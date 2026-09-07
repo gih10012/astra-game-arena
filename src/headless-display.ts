@@ -151,8 +151,6 @@ export async function startVirtualGame(options: {
     if (steamEnabled) {
       steamEnvironment = {
         ...childEnvironment,
-        SteamAppId: options.game.appId,
-        SteamGameId: options.game.appId,
         PROTON_LOG: "1",
         PROTON_LOG_DIR: options.runtimeDirectory,
       };
