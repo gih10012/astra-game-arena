@@ -9,7 +9,7 @@ test("builds a live 1920x1080 V4L2 composition without touching a real camera", 
   const capture = virtualCameraGameRecorderArguments("HEADLESS-1");
   assert.ok(capture.includes("-y"));
   assert.ok(capture.includes("-D"));
-  assert.ok(capture.includes("/dev/stdout"));
+  assert.ok(capture.includes("pipe:1"));
   assert.equal(capture[capture.indexOf("-o") + 1], "HEADLESS-1");
 
   const output = virtualCameraFfmpegArguments({

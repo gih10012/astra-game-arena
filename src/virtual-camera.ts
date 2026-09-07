@@ -91,7 +91,7 @@ export function virtualCameraGameRecorderArguments(outputName: string): string[]
     "-p", "crf=18",
     "-p", "keyint=30",
     "-m", "matroska",
-    "-f", "/dev/stdout",
+    "-f", "pipe:1",
   ];
 }
 
