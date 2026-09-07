@@ -46,6 +46,7 @@ test("durably tracks an active resumable run", async () => {
     options: {
       rootDirectory: root,
       port: 4317,
+      gpuPreference: "auto",
       reasoningEffort: "high",
       record: true,
       virtualCamera: false,

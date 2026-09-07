@@ -25,6 +25,7 @@ test("serves the durable control page with every pre-run setting", async (contex
   const html = await fetch(url).then((response) => response.text());
   for (const id of [
     "game-select",
+    "gpu-select",
     "goal-input",
     "record-toggle",
     "virtual-camera-toggle",
@@ -88,6 +89,7 @@ test("reports active configuration, account percentages, and earliest reset", as
       port: 4318,
       model: "gpt-6-astra",
       goal: "Complete the game",
+      gpuPreference: "discrete",
       reasoningEffort: "high",
       record: true,
       virtualCamera: true,
@@ -123,6 +125,7 @@ test("reports active configuration, account percentages, and earliest reset", as
   const status = await fetch(`${url}/api/status`).then((response) => response.json());
 
   assert.equal(status.configuration.model, "gpt-6-astra");
+  assert.equal(status.configuration.gpuPreference, "discrete");
   assert.equal(status.configuration.source, "active-run");
   assert.equal(status.configuration.virtualCamera, true);
   assert.equal(status.currentAccount.email, "one@example.com");

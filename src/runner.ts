@@ -98,6 +98,7 @@ export interface RunOptions {
   model?: string;
   goal?: string;
   gameAppId?: string;
+  gpuPreference?: "auto" | "integrated" | "discrete";
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   record?: boolean;
   virtualCamera?: boolean;
@@ -154,6 +155,7 @@ async function initializeChallenge(
     model,
     goal,
     game,
+    gpuPreference: options.gpuPreference ?? "auto",
     reasoningEffort: options.reasoningEffort ?? "high",
     record: options.record !== false,
     virtualCamera: options.virtualCamera === true,
@@ -194,6 +196,7 @@ async function initializeChallenge(
     model,
     reasoningEffort: persistedOptions.reasoningEffort,
     goal,
+    gpuPreference: persistedOptions.gpuPreference,
     prompt: initialPrompt(goal, game.name),
     resumePrompt: RESUME_PROMPT,
     targetLevels: game.appId === "1260520" ? TARGET_LEVELS : null,
@@ -617,6 +620,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       rootDirectory,
       runtimeDirectory,
       game: selectedGame,
+      gpuPreference: prior.options.gpuPreference,
     });
     const activeGame = new X11GameAdapter({
       display: virtualGame.display,

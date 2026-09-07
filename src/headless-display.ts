@@ -34,6 +34,7 @@ export async function startVirtualGame(options: {
   rootDirectory: string;
   runtimeDirectory: string;
   game: InstalledSteamGame;
+  gpuPreference?: "auto" | "integrated" | "discrete";
 }): Promise<VirtualGameRuntime> {
   await mkdir(options.runtimeDirectory, { recursive: true });
   const xvfb = await resolveTool(
@@ -55,6 +56,7 @@ export async function startVirtualGame(options: {
   await access(cageHostEntry);
 
   const runtimeEnvironment = withoutPhysicalDisplay(process.env);
+  applyGpuPreference(runtimeEnvironment, options.gpuPreference ?? "auto");
   const runtimeBase = process.env.XDG_RUNTIME_DIR || os.tmpdir();
   const waylandRuntimeDirectory = await mkdtemp(path.join(runtimeBase, "astra-game-"));
   await chmod(waylandRuntimeDirectory, 0o700);
@@ -220,6 +222,23 @@ export async function startVirtualGame(options: {
     for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");
     await rm(waylandRuntimeDirectory, { recursive: true, force: true });
     throw error;
+  }
+}
+
+export function applyGpuPreference(
+  environment: NodeJS.ProcessEnv,
+  preference: "auto" | "integrated" | "discrete",
+): void {
+  if (preference === "discrete") {
+    environment.__NV_PRIME_RENDER_OFFLOAD = "1";
+    environment.__VK_LAYER_NV_optimus = "NVIDIA_only";
+    environment.__GLX_VENDOR_LIBRARY_NAME = "nvidia";
+    environment.DRI_PRIME = "1";
+  } else if (preference === "integrated") {
+    environment.__NV_PRIME_RENDER_OFFLOAD = "0";
+    environment.__VK_LAYER_NV_optimus = "non_NVIDIA_only";
+    environment.__GLX_VENDOR_LIBRARY_NAME = "mesa";
+    environment.DRI_PRIME = "0";
   }
 }
 
@@ -495,11 +514,46 @@ async function waitForXDisplay(
   throw new Error("Xvfb startup timed out");
 }
 
-async function freeXDisplay(first: number, last: number): Promise<string> {
+export async function freeXDisplay(
+  first: number,
+  last: number,
+  paths: { socketDirectory?: string; lockDirectory?: string } = {},
+): Promise<string> {
+  const socketDirectory = paths.socketDirectory ?? "/tmp/.X11-unix";
+  const lockDirectory = paths.lockDirectory ?? "/tmp";
   for (let number = first; number <= last; number++) {
-    if (!existsSync(`/tmp/.X11-unix/X${number}`)) return `:${number}`;
+    const socket = path.join(socketDirectory, `X${number}`);
+    const lock = path.join(lockDirectory, `.X${number}-lock`);
+    if (!existsSync(socket) && !existsSync(lock)) return `:${number}`;
+
+    const lockPid = await readFile(lock, "utf8")
+      .then((value) => Number(value.trim()))
+      .catch(() => Number.NaN);
+    if (Number.isInteger(lockPid) && processIsAlive(lockPid)) continue;
+
+    if (socketDirectory === "/tmp/.X11-unix") {
+      const probe = await runCommand("xprop", ["-display", `:${number}`, "-root"], {
+        timeoutMs: 500,
+      });
+      if (probe.code === 0) continue;
+    }
+
+    await Promise.all([
+      rm(socket, { force: true }),
+      rm(lock, { force: true }),
+    ]);
+    if (!existsSync(socket) && !existsSync(lock)) return `:${number}`;
   }
   throw new Error(`No free X display between :${first} and :${last}`);
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function steamIsRunning(): Promise<boolean> {

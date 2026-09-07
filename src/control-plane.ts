@@ -164,6 +164,7 @@ export class ControlPlane {
         defaults: {
           gameAppId: "1260520",
           goal: "Complete all official levels in Patrick's Parabox.",
+          gpuPreference: "auto",
           model: "gpt-6-astra",
           reasoningEffort: "high",
           record: true,
@@ -254,6 +255,7 @@ export class ControlPlane {
         throw new HttpError(400, "Goal must contain 3 to 4000 characters");
       }
       const reasoningEffort = parseReasoning(body.reasoningEffort);
+      const gpuPreference = parseGpuPreference(body.gpuPreference);
       const accountPolicies = parseAccountPolicies(body.accountPolicies, options.accounts);
       const virtualCamera = body.virtualCamera === true;
       const virtualCameraDevice = String(
@@ -292,6 +294,7 @@ export class ControlPlane {
         gameAppId,
         model,
         goal,
+        gpuPreference,
         reasoningEffort,
         record: body.record !== false,
         virtualCamera,
@@ -587,6 +590,7 @@ function configurationStatus(
     internalPort: configured?.port ?? 4318,
     game: configured?.game ?? null,
     gameAppId: configured?.game?.appId ?? "1260520",
+    gpuPreference: configured?.gpuPreference ?? "auto",
     goal:
       configured?.goal ?? "Complete all official levels in Patrick's Parabox.",
     model: configured?.model ?? "gpt-6-astra",
@@ -745,6 +749,14 @@ function parseReasoning(value: unknown): "low" | "medium" | "high" | "xhigh" | "
     throw new HttpError(400, "Invalid reasoning effort");
   }
   return effort as "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+}
+
+function parseGpuPreference(value: unknown): "auto" | "integrated" | "discrete" {
+  const preference = String(value ?? "auto");
+  if (!("auto integrated discrete".split(" ")).includes(preference)) {
+    throw new HttpError(400, "Invalid GPU preference");
+  }
+  return preference as "auto" | "integrated" | "discrete";
 }
 
 function parseAccountPolicies(value: unknown, accounts: unknown[]): AccountPolicy[] {

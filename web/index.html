@@ -43,6 +43,15 @@
               <select id="game-select" name="gameAppId" required></select>
               <small id="game-detail">扫描本机已安装游戏</small>
             </label>
+            <label class="field gpu-field">
+              <span>图形处理器</span>
+              <select id="gpu-select" name="gpuPreference" required>
+                <option value="auto">自动选择</option>
+                <option value="discrete">独立显卡</option>
+                <option value="integrated">集成显卡</option>
+              </select>
+              <small>大型 3D 游戏建议选择独立显卡</small>
+            </label>
             <label class="field model-field">
               <span>模型</span>
               <select id="model-select" name="model" required></select>

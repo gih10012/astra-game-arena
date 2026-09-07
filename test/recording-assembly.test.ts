@@ -39,6 +39,7 @@ function checkpoint(phase: RunPhase): RunCheckpoint {
     options: {
       rootDirectory: "/tmp",
       port: 4317,
+      gpuPreference: "auto",
       reasoningEffort: "high",
       record: true,
       virtualCamera: false,

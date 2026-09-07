@@ -91,6 +91,7 @@ if (command === "doctor") {
     port: numberArg(args, "--internal-port", 4318),
     model: stringArg(args, "--model", "gpt-6-astra"),
     gameAppId: stringArg(args, "--game", "1260520"),
+    gpuPreference: stringArg(args, "--gpu", "auto") as "auto" | "integrated" | "discrete",
     goal: stringArg(args, "--goal", "Complete all official levels in Patrick's Parabox."),
     reasoningEffort: reasoning,
     record: !args.includes("--no-record"),
@@ -207,7 +208,7 @@ Usage:
   game-arena demo [--port 4320] [--duration SECONDS] [--browser]
   game-arena smoke-model [--codex-home PATH]
   game-arena smoke-headless
-  game-arena run [--game APPID] [--goal TEXT] [--model MODEL] [--reasoning high] [--quota-wait-hours 5] [--codex-home PATH] [--no-record] [--virtual-camera /dev/video10] [--foreground]
+  game-arena run [--game APPID] [--gpu auto|integrated|discrete] [--goal TEXT] [--model MODEL] [--reasoning high] [--quota-wait-hours 5] [--codex-home PATH] [--no-record] [--virtual-camera /dev/video10] [--foreground]
   game-arena resume <run-directory>
   game-arena cancel <run-directory>
   game-arena status

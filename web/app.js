@@ -209,6 +209,7 @@ async function loadOptions() {
   modelSelect.replaceChildren(...state.options.models.map((model) => new Option(model.displayName, model.slug)));
   modelSelect.value = state.options.defaults.model;
   byId("goal-input").value = state.options.defaults.goal;
+  byId("gpu-select").value = state.options.defaults.gpuPreference;
   byId("record-toggle").checked = state.options.defaults.record;
   byId("virtual-camera-toggle").checked = state.options.defaults.virtualCamera;
   renderVirtualCameras();
@@ -293,6 +294,7 @@ async function submitChallenge(event) {
   try {
     await postControl("start", {
       gameAppId: byId("game-select").value,
+      gpuPreference: byId("gpu-select").value,
       model: byId("model-select").value,
       reasoningEffort: byId("reasoning-select").value,
       goal: byId("goal-input").value,
