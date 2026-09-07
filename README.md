@@ -53,7 +53,7 @@ npm run doctor
 
 By default, the harness uses `~/.codex-official` when that directory contains `auth.json`, then falls back to the normal Codex home. Override it with `--codex-home PATH` or `ASTRA_CODEX_HOME`. Credentials are never copied into run artifacts.
 
-If two or more separately authenticated homes exist under `~/.codex-parabox-accounts/<label>/auth.json`, the runner enables its resumable account pool. The same Codex thread is synchronized through `codex-proxy` when accounts rotate. It prefers an account whose five-hour window most recently reset, immediately rotates away from an exhausted account, and stops at the next snapshot boundary whenever continuing would leave every account with less than 50% of its five-hour allowance. `runs/<run-id>/account-pool.json` records only scheduling telemetry; authentication files remain outside the repository. Multi-account use is disclosed in the audit trail.
+If two or more separately authenticated homes exist under `~/.codex-parabox-accounts/<label>/auth.json`, the runner enables its resumable account pool. The same Codex thread is synchronized through `codex-proxy` when accounts rotate. It prefers an account whose five-hour window most recently reset, proactively snapshots and switches when a newer reset arrives, immediately rotates away from an exhausted account, and stops at the next snapshot boundary whenever continuing would leave every account with less than 50% of its five-hour allowance. `runs/<run-id>/account-pool.json` records only scheduling telemetry; authentication files remain outside the repository. Multi-account use is disclosed in the audit trail.
 
 Validate authentication and the four benchmark-specific MCP tools with a small, non-challenge GPT-6-Astra turn before touching saves:
 

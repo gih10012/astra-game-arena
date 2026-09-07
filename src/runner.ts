@@ -319,6 +319,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let savePoll: NodeJS.Timeout | null = null;
   let checkpointPoll: NodeJS.Timeout | null = null;
   let powerPoll: NodeJS.Timeout | null = null;
+  let accountPoll: NodeJS.Timeout | null = null;
   const checkpointWork: { current: Promise<void> | null } = { current: null };
   let checkpointBusy = false;
   let restored = false;
@@ -326,6 +327,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let quotaResetAtMs: number | null = null;
   let activeAccountId: string | null = null;
   let reservePauseRequested = false;
+  let accountRotationRequested = false;
   let exitDescription = "Codex exited before completion";
   let requestedStop: "pause" | "restart" | null = null;
   let powerPauseRequested = false;
@@ -432,6 +434,26 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     }, 5_000);
     terminate.unref();
     kill.unref();
+  };
+  const checkAccountRotation = async () => {
+    if (!accountPool || !activeAccountId || accountRotationRequested) return;
+    const choice = accountPool.choose();
+    if (!choice.account || choice.account.id === activeAccountId) return;
+    accountRotationRequested = true;
+    exitDescription = "A more recently reset Codex account is now eligible";
+    await accountPool.persist();
+    const accountLabel = path.basename(choice.account.home);
+    await audit.append("account.rotation_due", {
+      attempt,
+      account: accountLabel,
+      reason: "newer-five-hour-reset",
+    });
+    controller?.publishTranscript({
+      type: "runner.account_rotation",
+      account: accountLabel,
+      message: `A newer allowance reset is available; snapshotting and switching to ${accountLabel}.`,
+    });
+    stopCodex();
   };
   const checkPower = async () => {
     if (powerCheckBusy) return;
@@ -643,11 +665,17 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           void audit.append("power.warning", String(error));
         });
       }, 5_000);
+      accountPoll = setInterval(() => {
+        void checkAccountRotation().catch((error: unknown) => {
+          void audit.append("account.rotation.warning", String(error));
+        });
+      }, 5_000);
 
       while (state.snapshot().status !== "completed" && requestedStop === null) {
         quotaExhausted = false;
         quotaResetAtMs = null;
         reservePauseRequested = false;
+        accountRotationRequested = false;
         activeAccountId = null;
         exitDescription = "Codex exited before completion";
         let activeCodexHome = codexHome;
@@ -778,7 +806,8 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           if (
             first.type === "exit" &&
             state.snapshot().status === "running" &&
-            !reservePauseRequested
+            !reservePauseRequested &&
+            !accountRotationRequested
           ) {
             exitDescription = `Codex exited before completion (code=${first.exit.code}, signal=${first.exit.signal})`;
           } else if (
@@ -816,16 +845,21 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
 
         if (requestedStop !== null) break;
         let rotateAccountImmediately = false;
-        if (accountPool && activeAccountId && quotaExhausted) {
-          if (!reservePauseRequested) {
+        if (
+          accountPool &&
+          activeAccountId &&
+          (quotaExhausted || accountRotationRequested)
+        ) {
+          if (!reservePauseRequested && !accountRotationRequested) {
             quotaResetAtMs ??= Date.now() + prior.options.quotaWaitMs;
             await accountPool.markBlocked(activeAccountId, quotaResetAtMs);
           }
           const nextAccount = accountPool.choose();
           await accountPool.persist();
           rotateAccountImmediately =
-            nextAccount.account !== null &&
-            nextAccount.account.id !== activeAccountId;
+            accountRotationRequested ||
+            (nextAccount.account !== null &&
+              nextAccount.account.id !== activeAccountId);
           if (!nextAccount.account && nextAccount.retryAtMs !== null) {
             quotaResetAtMs = nextAccount.retryAtMs;
           }
@@ -980,6 +1014,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     if (savePoll) clearInterval(savePoll);
     if (checkpointPoll) clearInterval(checkpointPoll);
     if (powerPoll) clearInterval(powerPoll);
+    if (accountPoll) clearInterval(accountPoll);
     if (checkpointWork.current) {
       await checkpointWork.current.catch(() => undefined);
     }
