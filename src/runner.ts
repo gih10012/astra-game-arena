@@ -376,7 +376,12 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   };
 
   const inspectDiagnostic = (text: string) => {
-    if (isQuotaError(text)) quotaExhausted = true;
+    if (!isQuotaError(text)) return;
+    quotaExhausted = true;
+    const resetAt = extractQuotaResetAtFromText(text);
+    if (resetAt !== null && resetAt > Date.now()) {
+      quotaResetAtMs = Math.max(quotaResetAtMs ?? 0, resetAt);
+    }
   };
   const inspectEvent = (event: unknown) => {
     const resetAt = extractQuotaResetAt(event);
@@ -1183,6 +1188,30 @@ export function isQuotaError(text: string): boolean {
   return /(?:\b429\b|rate[_ -]?limit|usage limit|too many requests|insufficient_quota|limit has been reached|you(?:'ve| have) hit (?:your )?[^\n]*limit)/i.test(
     text,
   );
+}
+
+export function extractQuotaResetAtFromText(
+  text: string,
+  nowMs = Date.now(),
+): number | null {
+  const dated = text.match(
+    /try again at\s+([A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?,\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))/i,
+  );
+  if (dated) {
+    const parsed = Date.parse(dated[1]!.replace(/(\d)(?:st|nd|rd|th),/i, "$1,"));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  const clock = text.match(
+    /try again at\s+(\d{1,2}):(\d{2})\s*(AM|PM)\b/i,
+  );
+  if (!clock) return null;
+  let hours = Number(clock[1]) % 12;
+  if (clock[3]!.toUpperCase() === "PM") hours += 12;
+  const reset = new Date(nowMs);
+  reset.setHours(hours, Number(clock[2]), 0, 0);
+  if (reset.getTime() <= nowMs) reset.setDate(reset.getDate() + 1);
+  return reset.getTime();
 }
 
 export function quotaRetryAt(

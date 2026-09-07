@@ -5,6 +5,7 @@ import { codexEnvironment } from "../src/codex-home.js";
 import {
   codexArguments,
   isQuotaError,
+  extractQuotaResetAtFromText,
   NEUTRAL_PROMPT,
   quotaRetryAt,
   RESUME_PROMPT,
@@ -72,6 +73,25 @@ test("recognizes common quota exhaustion errors without matching generic failure
   assert.equal(isQuotaError("insufficient_quota"), true);
   assert.equal(isQuotaError("quota snapshot saved successfully"), false);
   assert.equal(isQuotaError("connection reset by peer"), false);
+});
+
+test("extracts the reset deadline printed in quota errors", () => {
+  const now = new Date(2026, 8, 7, 7, 0, 0).getTime();
+  assert.equal(
+    extractQuotaResetAtFromText("You've hit your usage limit; try again at 8:28 AM.", now),
+    new Date(2026, 8, 7, 8, 28, 0).getTime(),
+  );
+  assert.equal(
+    extractQuotaResetAtFromText(
+      "You've hit your usage limit; try again at Sep 12th, 2026 10:24 PM.",
+      now,
+    ),
+    new Date(2026, 8, 12, 22, 24, 0).getTime(),
+  );
+  assert.equal(
+    extractQuotaResetAtFromText("unexpected status 401 Unauthorized", now),
+    null,
+  );
 });
 
 test("uses the exhausted Codex window reset with a one-minute grace period", () => {
