@@ -43,7 +43,9 @@ test("serves the durable control page with every pre-run setting", async (contex
   const status = await fetch(`${url}/api/status`).then((response) => response.json());
   assert.equal(status.service.name, "astra-game-arena");
   assert.equal(status.challenge.phase, "idle");
-  assert.equal(status.configuration, null);
+  assert.equal(status.configuration.source, "defaults");
+  assert.equal(status.configuration.record, true);
+  assert.equal(status.configuration.virtualCamera, false);
   assert.equal(status.currentAccount, null);
   assert.equal(status.earliestResetAt, null);
   assert.equal(status.virtualCamera.enabled, false);
@@ -121,6 +123,7 @@ test("reports active configuration, account percentages, and earliest reset", as
   const status = await fetch(`${url}/api/status`).then((response) => response.json());
 
   assert.equal(status.configuration.model, "gpt-6-astra");
+  assert.equal(status.configuration.source, "active-run");
   assert.equal(status.configuration.virtualCamera, true);
   assert.equal(status.currentAccount.email, "one@example.com");
   assert.equal(status.currentAccount.fiveHour.usedPercent, 37);

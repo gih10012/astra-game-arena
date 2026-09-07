@@ -177,6 +177,7 @@ export class ControlPlane {
       const accountPool = await accountPoolSnapshot(this.#checkpoint);
       const virtualCameras = await discoverVirtualCameraDevices();
       json(response, 200, statusSnapshot({
+        rootDirectory: this.rootDirectory,
         host: this.host,
         port: this.port,
         checkpoint: this.#checkpoint,
@@ -503,6 +504,7 @@ async function accountPoolSnapshot(checkpoint: RunCheckpoint | null): Promise<Ac
 }
 
 function statusSnapshot(options: {
+  rootDirectory: string;
   host: string;
   port: number;
   checkpoint: RunCheckpoint | null;
@@ -545,7 +547,12 @@ function statusSnapshot(options: {
       reason: checkpoint?.reason ?? null,
       snapshot: options.challenge,
     },
-    configuration: checkpoint?.options ?? null,
+    configuration: configurationStatus(
+      checkpoint,
+      options.rootDirectory,
+      options.port,
+      options.virtualCameras[0]?.device ?? "/dev/video10",
+    ),
     currentAccount,
     accountPool: {
       activeAccountId: options.accountPool?.activeAccountId ?? null,
@@ -563,6 +570,36 @@ function statusSnapshot(options: {
       available: options.virtualCameras.some((device) => device.writable),
       devices: options.virtualCameras,
     },
+  };
+}
+
+function configurationStatus(
+  checkpoint: RunCheckpoint | null,
+  rootDirectory: string,
+  publicPort: number,
+  defaultVirtualCameraDevice: string,
+) {
+  const configured = checkpoint?.options;
+  return {
+    source: configured ? "active-run" : "defaults",
+    rootDirectory: configured?.rootDirectory ?? rootDirectory,
+    publicPort: configured?.publicPort ?? publicPort,
+    internalPort: configured?.port ?? 4318,
+    game: configured?.game ?? null,
+    gameAppId: configured?.game?.appId ?? "1260520",
+    goal:
+      configured?.goal ?? "Complete all official levels in Patrick's Parabox.",
+    model: configured?.model ?? "gpt-6-astra",
+    reasoningEffort: configured?.reasoningEffort ?? "high",
+    record: configured?.record ?? true,
+    virtualCamera: configured?.virtualCamera ?? false,
+    virtualCameraDevice:
+      configured?.virtualCameraDevice ?? defaultVirtualCameraDevice,
+    openDashboard: configured?.openDashboard ?? false,
+    isolateSaves: configured?.isolateSaves ?? true,
+    codexHome: configured?.codexHome ?? null,
+    quotaWaitMs: configured?.quotaWaitMs ?? 5 * 60 * 60_000,
+    accountPolicies: configured?.accountPolicies ?? [],
   };
 }
 
