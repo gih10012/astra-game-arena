@@ -68,3 +68,20 @@ test("prefers the account whose allowance most recently reset", async () => {
   assert.equal(pool.choose(now).account?.id, "b");
   assert.equal(pool.choose(now).limitedByReserve, true);
 });
+
+test("returns the earliest account reset when every account is blocked", async () => {
+  const run = await mkdtemp(path.join(os.tmpdir(), "parabox-pool-wait-"));
+  const now = new Date("2026-09-07T03:00:00Z").getTime();
+  const pool = await AccountPool.open(run, [
+    profile("a", "a@example.test", "/accounts/a"),
+    profile("b", "b@example.test", "/accounts/b"),
+  ]);
+  await pool.markBlocked("a", now + 10_000);
+  await pool.markBlocked("b", now + 20_000);
+  assert.deepEqual(pool.choose(now), {
+    account: null,
+    limitedByReserve: false,
+    retryAtMs: now + 10_000,
+  });
+  assert.equal(pool.choose(now + 10_001).account?.id, "a");
+});

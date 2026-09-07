@@ -264,6 +264,10 @@ export class AccountPool {
         account.secondary = { usedPercent: 0, resetsAtMs: null };
       }
       if (account.blockedUntilMs !== null && account.blockedUntilMs <= nowMs) {
+        account.lastPrimaryResetAtMs = Math.max(
+          account.lastPrimaryResetAtMs ?? 0,
+          account.blockedUntilMs,
+        );
         account.blockedUntilMs = null;
       }
     }

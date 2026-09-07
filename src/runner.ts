@@ -651,14 +651,12 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         activeAccountId = null;
         exitDescription = "Codex exited before completion";
         let activeCodexHome = codexHome;
-        let activeSessionsRoot = defaultSessionsRoot;
         if (accountPool && !powerPauseRequested) {
           const choice = accountPool.choose();
           await accountPool.persist();
           if (choice.account) {
             activeAccountId = choice.account.id;
             activeCodexHome = choice.account.home;
-            activeSessionsRoot = path.join(choice.account.home, "sessions");
             const accountLabel = path.basename(choice.account.home);
             await audit.append("account.selected", {
               attempt,
@@ -739,7 +737,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
                 tailers.clear();
                 const tailer = new RolloutTailer(
                   root.thread_id,
-                  activeSessionsRoot,
+                  defaultSessionsRoot,
                   codexStartedAtMs,
                 );
                 tailers.add(tailer);
@@ -823,9 +821,14 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             quotaResetAtMs ??= Date.now() + prior.options.quotaWaitMs;
             await accountPool.markBlocked(activeAccountId, quotaResetAtMs);
           }
-          rotateAccountImmediately = accountPool.hasImmediateAlternative(
-            activeAccountId,
-          );
+          const nextAccount = accountPool.choose();
+          await accountPool.persist();
+          rotateAccountImmediately =
+            nextAccount.account !== null &&
+            nextAccount.account.id !== activeAccountId;
+          if (!nextAccount.account && nextAccount.retryAtMs !== null) {
+            quotaResetAtMs = nextAccount.retryAtMs;
+          }
         }
         outcomePhase = powerPauseRequested
           ? "waiting_power"
