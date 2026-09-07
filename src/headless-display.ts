@@ -162,14 +162,6 @@ export async function startVirtualGame(options: {
       "-noverifyfiles",
       "-silent",
     ];
-    if (!directProtonLaunch) {
-      steamArguments.push(
-        "-applaunch", options.game.appId,
-        "-screen-fullscreen", "0",
-        "-screen-width", String(GAME_WIDTH),
-        "-screen-height", String(VIDEO_HEIGHT),
-      );
-    }
     const steamProcess = spawn("steam", steamArguments, {
       env: steamEnvironment,
       detached: true,
@@ -178,6 +170,25 @@ export async function startVirtualGame(options: {
     logChildOutput(steamProcess, path.join(options.runtimeDirectory, "steam.log"));
     childProcesses.push(steamProcess);
     await waitForSteamReady(steamProcess, 30 * 60_000);
+
+    // Sending -applaunch during a cold Steam startup can be replayed by both
+    // the updater and the final client, yielding a spurious "game is already
+    // running" dialog.  Hand it to the already-running client exactly once.
+    if (!directProtonLaunch) {
+      await delay(5_000);
+      const launchProcess = spawn("steam", [
+        "-applaunch", options.game.appId,
+        "-screen-fullscreen", "0",
+        "-screen-width", String(GAME_WIDTH),
+        "-screen-height", String(VIDEO_HEIGHT),
+      ], {
+        env: steamEnvironment,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      logChildOutput(launchProcess, path.join(options.runtimeDirectory, "steam-launch.log"));
+      childProcesses.push(launchProcess);
+    }
 
     const steamRoot = path.join(process.env.HOME ?? "", ".local/share/Steam");
     const gameEnvironment: NodeJS.ProcessEnv = {
