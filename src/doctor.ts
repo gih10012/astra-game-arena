@@ -2,6 +2,7 @@ import { access, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { discoverCodexAccounts } from "./account-pool.js";
 import {
   CODEX_COMMAND,
   codexEnvironment,
@@ -119,6 +120,16 @@ export async function runDoctor(options: { codexHome?: string } = {}): Promise<D
         ? `authenticated via ${displayCodexHome(codexHome)}`
         : `not authenticated via ${displayCodexHome(codexHome)}`,
     required: true,
+  });
+
+  const accountProfiles = await discoverCodexAccounts();
+  checks.push({
+    name: "Codex account pool",
+    ok: accountProfiles.length >= 2,
+    detail: accountProfiles.length > 0
+      ? `${accountProfiles.length} isolated profile(s): ${accountProfiles.map((profile) => path.basename(profile.home)).join(", ")}`
+      : "disabled (no isolated profiles)",
+    required: false,
   });
 
   const modelResult = await runCommand(CODEX_COMMAND, ["debug", "models", "--bundled"], {

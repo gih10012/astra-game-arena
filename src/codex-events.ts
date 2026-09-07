@@ -1,4 +1,5 @@
 import type { TokenUsage } from "./types.js";
+import type { CodexRateLimits, RateWindowState } from "./account-pool.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -95,6 +96,21 @@ export function extractQuotaResetAt(event: unknown): number | null {
   return Math.max(...applicable.map(({ resetsAt }) => resetsAt)) * 1_000;
 }
 
+export function extractRateLimits(event: unknown): CodexRateLimits | null {
+  const root = object(event);
+  const payload = object(root?.payload);
+  const rateLimits = object(payload?.rate_limits ?? root?.rate_limits);
+  if (!rateLimits) return null;
+  const primary = rateWindow(rateLimits.primary);
+  const secondary = rateWindow(rateLimits.secondary);
+  return primary || secondary
+    ? {
+        primary: primary ?? { usedPercent: null, resetsAtMs: null },
+        secondary: secondary ?? { usedPercent: null, resetsAtMs: null },
+      }
+    : null;
+}
+
 export function mergeUsage(current: TokenUsage, next: TokenUsage): TokenUsage {
   if (next.totalTokens >= current.totalTokens) return next;
   return current;
@@ -110,6 +126,21 @@ function rateLimitTypeMatchesWindow(type: string, name: string): boolean {
   if (name === "primary") return /(?:five|5)[_-]?(?:hour|h)/.test(type);
   if (name === "secondary") return type.includes("week");
   return name === "individual_limit" && type.includes("individual");
+}
+
+function rateWindow(value: unknown): RateWindowState | null {
+  const window = object(value);
+  if (!window) return null;
+  const used = window.used_percent ?? window.usedPercent;
+  const reset = window.resets_at ?? window.resetsAt;
+  return {
+    usedPercent:
+      typeof used === "number" && Number.isFinite(used) ? used : null,
+    resetsAtMs:
+      typeof reset === "number" && Number.isFinite(reset) && reset > 0
+        ? reset * 1_000
+        : null,
+  };
 }
 
 export function publicTranscriptEvent(event: unknown): unknown | null {

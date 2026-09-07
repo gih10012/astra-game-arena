@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { publicTranscriptEvent } from "../src/codex-events.js";
+import { extractRateLimits, publicTranscriptEvent } from "../src/codex-events.js";
+
+test("extracts five-hour and weekly account allowance telemetry", () => {
+  assert.deepEqual(
+    extractRateLimits({
+      type: "event_msg",
+      payload: {
+        rate_limits: {
+          primary: { used_percent: 49, resets_at: 1_800_000_000 },
+          secondary: { used_percent: 91, resets_at: 1_800_500_000 },
+        },
+      },
+    }),
+    {
+      primary: { usedPercent: 49, resetsAtMs: 1_800_000_000_000 },
+      secondary: { usedPercent: 91, resetsAtMs: 1_800_500_000_000 },
+    },
+  );
+});
 
 test("retains complete Codex events while removing secrets and image payloads", () => {
   const visible = publicTranscriptEvent({

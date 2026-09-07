@@ -13,6 +13,11 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { AuditLog, createRunId } from "./audit-log.js";
+import {
+  AccountPool,
+  discoverCodexAccounts,
+  inheritCodexConfiguration,
+} from "./account-pool.js";
 import { ChallengeState } from "./challenge-state.js";
 import {
   CODEX_COMMAND,
@@ -23,6 +28,7 @@ import {
 import {
   emptyTokenUsage,
   extractQuotaResetAt,
+  extractRateLimits,
   extractTokenUsage,
   publicTranscriptEvent,
 } from "./codex-events.js";
@@ -275,10 +281,19 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   const isColdResume = prior.attempt > 0;
   const saveGuard = new SaveGuard(paths.saveDirectory, runDirectory);
   const codexHome = prior.options.codexHome;
-  const sessionsRoot = path.join(
+  const defaultSessionsRoot = path.join(
     codexHome ?? path.join(os.homedir(), ".codex"),
     "sessions",
   );
+  const accountProfiles = await discoverCodexAccounts();
+  await Promise.all(
+    accountProfiles.map((profile) =>
+      inheritCodexConfiguration(profile.home, codexHome),
+    ),
+  );
+  const accountPool = accountProfiles.length >= 2
+    ? await AccountPool.open(runDirectory, accountProfiles)
+    : null;
   await checkpointStore.update({
     phase: "starting",
     attempt,
@@ -309,6 +324,8 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let restored = false;
   let quotaExhausted = false;
   let quotaResetAtMs: number | null = null;
+  let activeAccountId: string | null = null;
+  let reservePauseRequested = false;
   let exitDescription = "Codex exited before completion";
   let requestedStop: "pause" | "restart" | null = null;
   let powerPauseRequested = false;
@@ -383,10 +400,24 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       quotaResetAtMs = Math.max(quotaResetAtMs ?? 0, resetAt);
     }
   };
-  const inspectEvent = (event: unknown) => {
+  const inspectEvent = async (event: unknown) => {
     const resetAt = extractQuotaResetAt(event);
     if (resetAt !== null && resetAt > Date.now()) {
       quotaResetAtMs = Math.max(quotaResetAtMs ?? 0, resetAt);
+    }
+    const rateLimits = extractRateLimits(event);
+    if (accountPool && activeAccountId && rateLimits) {
+      await accountPool.update(activeAccountId, rateLimits);
+      if (accountPool.shouldStopForReserve(activeAccountId)) {
+        reservePauseRequested = true;
+        quotaExhausted = true;
+        exitDescription = "Stopped to preserve at least 50% of one account's five-hour allowance";
+        controller?.publishTranscript({
+          type: "runner.account_reserve",
+          message: exitDescription,
+        });
+        stopCodex();
+      }
     }
   };
   const stopCodex = () => {
@@ -616,8 +647,36 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       while (state.snapshot().status !== "completed" && requestedStop === null) {
         quotaExhausted = false;
         quotaResetAtMs = null;
+        reservePauseRequested = false;
+        activeAccountId = null;
         exitDescription = "Codex exited before completion";
-        if (!powerPauseRequested) {
+        let activeCodexHome = codexHome;
+        let activeSessionsRoot = defaultSessionsRoot;
+        if (accountPool && !powerPauseRequested) {
+          const choice = accountPool.choose();
+          await accountPool.persist();
+          if (choice.account) {
+            activeAccountId = choice.account.id;
+            activeCodexHome = choice.account.home;
+            activeSessionsRoot = path.join(choice.account.home, "sessions");
+            const accountLabel = path.basename(choice.account.home);
+            await audit.append("account.selected", {
+              attempt,
+              account: accountLabel,
+              limitedByReserve: choice.limitedByReserve,
+            });
+            activeController.publishTranscript({
+              type: "runner.account_selected",
+              account: accountLabel,
+              reserveFloor: "50% of one five-hour allowance",
+            });
+          } else {
+            quotaExhausted = true;
+            quotaResetAtMs = choice.retryAtMs;
+            exitDescription = "No account is currently eligible without violating the 50% reserve";
+          }
+        }
+        if (!powerPauseRequested && (!accountPool || activeAccountId)) {
           const part = String(attempt).padStart(4, "0");
           const currentThreadId = checkpointStore.snapshot().threadId;
           const args = codexArguments({
@@ -634,7 +693,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           );
           codex = spawn(CODEX_COMMAND, args, {
             cwd: workDirectory,
-            env: codexEnvironment(codexHome),
+            env: codexEnvironment(activeCodexHome),
             detached: true,
             stdio: ["ignore", "pipe", "pipe"],
           });
@@ -663,7 +722,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
               } catch {
                 return;
               }
-              inspectEvent(event);
+              await inspectEvent(event);
               state.ingestCodexEvent(event);
               const visible = publicTranscriptEvent(event);
               if (visible) activeController.publishTranscript(visible);
@@ -680,12 +739,12 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
                 tailers.clear();
                 const tailer = new RolloutTailer(
                   root.thread_id,
-                  sessionsRoot,
+                  activeSessionsRoot,
                   codexStartedAtMs,
                 );
                 tailers.add(tailer);
                 const tailerTask = tailer.follow(async (rolloutEvent, raw) => {
-                  inspectEvent(rolloutEvent);
+                  await inspectEvent(rolloutEvent);
                   state.ingestCodexEvent(rolloutEvent);
                   if (extractTokenUsage(rolloutEvent)) {
                     await audit.appendRaw("codex-usage.jsonl", raw);
@@ -718,7 +777,11 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             exitPromise.then((exit) => ({ type: "exit" as const, exit })),
             finishPromise.then((snapshot) => ({ type: "finish" as const, snapshot })),
           ]);
-          if (first.type === "exit" && state.snapshot().status === "running") {
+          if (
+            first.type === "exit" &&
+            state.snapshot().status === "running" &&
+            !reservePauseRequested
+          ) {
             exitDescription = `Codex exited before completion (code=${first.exit.code}, signal=${first.exit.signal})`;
           } else if (
             first.type === "finish" &&
@@ -754,17 +817,35 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         );
 
         if (requestedStop !== null) break;
+        let rotateAccountImmediately = false;
+        if (accountPool && activeAccountId && quotaExhausted) {
+          if (!reservePauseRequested) {
+            quotaResetAtMs ??= Date.now() + prior.options.quotaWaitMs;
+            await accountPool.markBlocked(activeAccountId, quotaResetAtMs);
+          }
+          rotateAccountImmediately = accountPool.hasImmediateAlternative(
+            activeAccountId,
+          );
+        }
         outcomePhase = powerPauseRequested
           ? "waiting_power"
+          : rotateAccountImmediately
+            ? "waiting_retry"
           : quotaExhausted
             ? "waiting_quota"
             : "waiting_retry";
         retryAt = powerPauseRequested
           ? null
+          : rotateAccountImmediately
+            ? new Date().toISOString()
           : quotaExhausted
             ? quotaRetryAt(Date.now(), prior.options.quotaWaitMs, quotaResetAtMs)
             : new Date(Date.now() + retryDelayMs(attempt)).toISOString();
-        reason = powerPauseRequested ? powerPauseReason : exitDescription;
+        reason = powerPauseRequested
+          ? powerPauseReason
+          : rotateAccountImmediately
+            ? "Switching to another eligible Codex account"
+            : exitDescription;
         const waitingSnapshot = state.snapshot();
         await checkpointStore.update({
           phase: outcomePhase,
