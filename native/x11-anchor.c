@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
   const int screen = DefaultScreen(display);
   const Window root = RootWindow(display, screen);
   const Window window = XCreateSimpleWindow(
-      display, root, 0, 0, 1280, 1080, 0,
+      display, root, 0, 0, 1920, 1080, 0,
       BlackPixel(display, screen), BlackPixel(display, screen));
   XStoreName(display, window, "Astra Game Arena bootstrap");
   XSelectInput(display, window, ExposureMask | StructureNotifyMask);

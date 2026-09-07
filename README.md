@@ -118,7 +118,7 @@ Defaults:
 - prompt: generated from the configured natural-language goal and isolated computer-use tools
 - recording: 1920×1080, 30 FPS Matroska parts from private displays
 - virtual camera: optional 1920×1080, 30 FPS V4L2 output with the same game/session layout
-- UI: native game at 1280×1080, director dashboard at 640×1080
+- UI: native game at 1920×1080; the final 1280×1080 game pane preserves its aspect ratio, beside a 640×1080 director dashboard
 - physical desktop windows: none by default; `--browser` opens only the monitoring dashboard
 - native web search and network browsers: disabled
 - Shell: enabled in an empty writable workspace, with outbound network disabled

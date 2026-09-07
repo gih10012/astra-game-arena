@@ -111,7 +111,8 @@ export async function composeRecordingPair(
       "-i", game,
       "-i", dashboard,
       "-filter_complex",
-      `[0:v]scale=1280:1080:flags=lanczos,setsar=1,setpts=N/(${FPS}*TB)[g];` +
+      `[0:v]scale=1280:1080:force_original_aspect_ratio=decrease:flags=lanczos,` +
+        `pad=1280:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,setpts=N/(${FPS}*TB)[g];` +
         `[1:v]scale=640:1080:flags=lanczos,setsar=1,setpts=N/(${FPS}*TB)[d];` +
         `[g][d]hstack=inputs=2:shortest=1,fps=${FPS},setpts=N/(${FPS}*TB)[v]`,
       "-map", "[v]",

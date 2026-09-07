@@ -486,7 +486,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       device: virtualCamera.device,
       dimensions: "1920x1080",
       framesPerSecond: 30,
-      layout: "native-game-1280x1080+codex-session-640x1080",
+      layout: "native-game-1920x1080-fit-into-1280x1080+codex-session-640x1080",
     });
     controller?.publishTranscript({
       type: "runner.virtual_camera_started",
@@ -1450,7 +1450,7 @@ async function loadRuntimeSnapshot(
       return {
         data,
         mimeType: "image/jpeg",
-        width: 1280,
+        width: 1920,
         height: 1080,
         sha256: createHash("sha256").update(data).digest("hex"),
         capturedAt: metadata.mtime.toISOString(),
@@ -1541,7 +1541,7 @@ async function startHoldingOverlay(
   const overlay = spawn("ffplay", [
     "-nostdin", "-hide_banner", "-loglevel", "error",
     "-f", "image2", "-loop", "1",
-    "-x", "1280", "-y", "1080",
+    "-x", "1920", "-y", "1080",
     "-noborder", framePath,
   ], {
     env: environment,

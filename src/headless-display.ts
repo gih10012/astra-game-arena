@@ -6,7 +6,7 @@ import path from "node:path";
 import { runCommand } from "./command.js";
 import type { InstalledSteamGame } from "./steam-catalog.js";
 
-const GAME_WIDTH = 1280;
+const GAME_WIDTH = 1920;
 const VIDEO_HEIGHT = 1080;
 const DASHBOARD_WIDTH = 640;
 

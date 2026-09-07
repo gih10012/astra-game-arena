@@ -14,7 +14,7 @@ test("composes native game and transcript streams into CFR 1920x1080 video", asy
   const dashboard = path.join(rawDirectory, "dashboard-part-0001.mkv");
   await Promise.all([
     expectCommand("ffmpeg", [
-      "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x1080:rate=30",
+      "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30",
       "-t", "0.5", "-c:v", "libx264", "-preset", "ultrafast", game,
     ]),
     expectCommand("ffmpeg", [

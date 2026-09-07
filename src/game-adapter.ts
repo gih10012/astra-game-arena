@@ -174,7 +174,7 @@ export class X11GameAdapter implements GameAdapter {
           "-nostdin", "-loglevel", "error", "-y",
           "-i", pngPath,
           "-frames:v", "1",
-          "-vf", "scale='min(1280,iw)':-2",
+          "-vf", "scale='min(1920,iw)':-2",
           "-q:v", "3",
           jpegPath,
         ], { timeoutMs: 10_000 });
@@ -188,7 +188,7 @@ export class X11GameAdapter implements GameAdapter {
           "-window_id", String(window.id),
           "-i", `${this.display}.0`,
           "-frames:v", "1",
-          "-vf", "scale='min(1280,iw)':-2",
+          "-vf", "scale='min(1920,iw)':-2",
           "-q:v", "3",
           jpegPath,
         ], { timeoutMs: 10_000 });

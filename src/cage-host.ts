@@ -18,7 +18,7 @@ const output = outputs[0]?.name;
 if (!output) throw new Error("Cage output is unavailable");
 const modeResult = await runCommand(
   "wlr-randr",
-  ["--output", output, "--custom-mode", "1280x1080@30Hz"],
+  ["--output", output, "--custom-mode", "1920x1080@30Hz"],
   { env: process.env, timeoutMs: 5_000 },
 );
 if (modeResult.code !== 0) {

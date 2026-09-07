@@ -48,7 +48,7 @@ server.registerTool(
   "observe_screen",
   {
     title: "Observe private game screen",
-    description: "Capture the current 1280x1080 native game screen.",
+    description: "Capture the current 1920x1080 native game screen.",
     inputSchema: {},
   },
   async () => {
@@ -102,14 +102,14 @@ server.registerTool(
   {
     title: "Use game mouse",
     description:
-      "Move, click, drag, or scroll the isolated game pointer using 1280x1080 screen coordinates; returns the resulting screen.",
+      "Move, click, drag, or scroll the isolated game pointer using 1920x1080 screen coordinates; returns the resulting screen.",
     inputSchema: {
       action: z.enum(["move", "click", "drag", "scroll"]),
-      x: z.number().int().min(0).max(1_279),
+      x: z.number().int().min(0).max(1_919),
       y: z.number().int().min(0).max(1_079),
       button: z.enum(["left", "middle", "right"]).default("left"),
       count: z.number().int().min(1).max(3).default(1),
-      toX: z.number().int().min(0).max(1_279).optional(),
+      toX: z.number().int().min(0).max(1_919).optional(),
       toY: z.number().int().min(0).max(1_079).optional(),
       durationMs: z.number().int().min(0).max(5_000).default(500),
       deltaX: z.number().int().min(-100).max(100).default(0),
