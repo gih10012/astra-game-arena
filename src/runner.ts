@@ -78,6 +78,10 @@ import {
   findInstalledSteamGame,
   type InstalledSteamGame,
 } from "./steam-catalog.js";
+import {
+  startVirtualCamera,
+  type ActiveVirtualCamera,
+} from "./virtual-camera.js";
 
 export const DEFAULT_GOAL = "Complete all official levels in Patrick's Parabox.";
 export const NEUTRAL_PROMPT = initialPrompt(DEFAULT_GOAL, "Patrick's Parabox");
@@ -96,6 +100,8 @@ export interface RunOptions {
   gameAppId?: string;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   record?: boolean;
+  virtualCamera?: boolean;
+  virtualCameraDevice?: string;
   openDashboard?: boolean;
   isolateSaves?: boolean;
   output?: string;
@@ -150,6 +156,8 @@ async function initializeChallenge(
     game,
     reasoningEffort: options.reasoningEffort ?? "high",
     record: options.record !== false,
+    virtualCamera: options.virtualCamera === true,
+    virtualCameraDevice: options.virtualCameraDevice ?? "/dev/video10",
     openDashboard: options.openDashboard === true,
     isolateSaves: game.appId === "1260520" && options.isolateSaves !== false,
     quotaWaitMs: options.quotaWaitMs ?? DEFAULT_QUOTA_WAIT_MS,
@@ -199,6 +207,10 @@ async function initializeChallenge(
     codexHome: displayCodexHome(codexHome),
     saveIsolation: persistedOptions.isolateSaves,
     recording: persistedOptions.record,
+    virtualCamera: {
+      enabled: persistedOptions.virtualCamera,
+      device: persistedOptions.virtualCameraDevice,
+    },
     displayBackend: "cage-headless-xwayland",
     recordingBackend: "cage-wlr-screencopy+native-cfr-composite",
     physicalDesktopWindows: persistedOptions.openDashboard ? "monitor-only" : "none",
@@ -213,7 +225,7 @@ async function initializeChallenge(
   await checkpoint.update({});
   if (queued) {
     await audit.append("challenge.queued", {
-      supervisor: "astra-parabox-watchdog.service",
+      supervisor: "astra-game-arena-watchdog.service",
       controlPlane: `http://127.0.0.1:${persistedOptions.publicPort}`,
     });
   }
@@ -350,6 +362,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
 
   let codex: ChildProcess | null = null;
   let recorder: ActiveRecordingPair | null = null;
+  let virtualCamera: ActiveVirtualCamera | null = null;
   let browser: ChildProcess | null = null;
   let game: X11GameAdapter | null = null;
   let controller: ArenaController | null = null;
@@ -444,6 +457,34 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       timestampMode: "frame-count",
       captureStartedAt,
       filename: recordingRelative,
+    });
+  };
+
+  const stopVirtualCamera = async () => {
+    const active = virtualCamera;
+    virtualCamera = null;
+    if (!active) return;
+    await active.close();
+    await audit.append("virtual_camera.stopped", { device: active.device });
+  };
+
+  const startCameraOutput = async () => {
+    if (!prior.options.virtualCamera || !virtualGame || !virtualDashboard) return;
+    virtualCamera = await startVirtualCamera({
+      device: prior.options.virtualCameraDevice,
+      game: virtualGame,
+      dashboard: virtualDashboard,
+      audit,
+    });
+    await audit.append("virtual_camera.started", {
+      device: virtualCamera.device,
+      dimensions: "1920x1080",
+      framesPerSecond: 30,
+      layout: "native-game-1280x1080+codex-session-640x1080",
+    });
+    controller?.publishTranscript({
+      type: "runner.virtual_camera_started",
+      device: virtualCamera.device,
     });
   };
 
@@ -662,13 +703,15 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       await audit.append("monitor.opened", { url, physicalDesktop: true });
     }
 
-    if (prior.options.record) {
+    if (prior.options.record || prior.options.virtualCamera) {
       virtualDashboard = await startVirtualDashboard({
         rootDirectory,
         runtimeDirectory,
         url,
       });
     }
+
+    await startCameraOutput();
 
     if (isColdResume) {
       if (resumeFrame) {
@@ -913,6 +956,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         }
         if (state.snapshot().status !== "completed") state.pause();
         await stopRecording();
+        await stopVirtualCamera();
 
         if (state.snapshot().status === "completed") break;
         const runtimeFrame = await captureRuntimeSnapshot(
@@ -1105,6 +1149,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     }
     if (codex?.exitCode === null) codex.kill("SIGINT");
     await stopRecording();
+    await stopVirtualCamera().catch(() => undefined);
     await stopHoldingOverlay();
     await game?.close().catch(() => undefined);
     await delay(500);

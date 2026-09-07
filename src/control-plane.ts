@@ -2,7 +2,12 @@ import { open, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { discoverCodexAccounts } from "./account-pool.js";
+import {
+  discoverCodexAccounts,
+  type AccountPoolState,
+  type AccountUsageState,
+  type RateWindowState,
+} from "./account-pool.js";
 import { runCommand } from "./command.js";
 import {
   CheckpointStore,
@@ -17,6 +22,7 @@ import {
 import { cancelChallenge, queueChallenge } from "./runner.js";
 import { restoreFromRecovery } from "./save-guard.js";
 import { discoverInstalledSteamGames } from "./steam-catalog.js";
+import { discoverVirtualCameraDevices } from "./virtual-camera.js";
 
 const webRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -52,7 +58,7 @@ export class ControlPlane {
   #lastStateJson = "";
   #lastTranscriptKey = "";
   #lastFrameEtag = "";
-  #options: { games: unknown[]; accounts: unknown[]; models: ModelOption[] } | null = null;
+  #options: Awaited<ReturnType<typeof loadOptions>> | null = null;
 
   constructor(rootDirectory: string, options: { host?: string; port?: number } = {}) {
     this.rootDirectory = path.resolve(rootDirectory);
@@ -151,7 +157,7 @@ export class ControlPlane {
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/options") {
-      this.#options ??= await loadOptions();
+      this.#options = await loadOptions();
       json(response, 200, {
         ...this.#options,
         reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -161,8 +167,23 @@ export class ControlPlane {
           model: "gpt-6-astra",
           reasoningEffort: "high",
           record: true,
+          virtualCamera: false,
+          virtualCameraDevice: this.#options.virtualCameras[0]?.device ?? "/dev/video10",
         },
       });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/status") {
+      const accountPool = await accountPoolSnapshot(this.#checkpoint);
+      const virtualCameras = await discoverVirtualCameraDevices();
+      json(response, 200, statusSnapshot({
+        host: this.host,
+        port: this.port,
+        checkpoint: this.#checkpoint,
+        challenge: this.#snapshot,
+        accountPool,
+        virtualCameras,
+      }));
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/supervisor") {
@@ -171,6 +192,7 @@ export class ControlPlane {
         checkpoint: this.#checkpoint,
         accountPool: await accountPoolSnapshot(this.#checkpoint),
         recording: recordingStatus(this.#checkpoint),
+        virtualCamera: virtualCameraStatus(this.#checkpoint),
       });
       return;
     }
@@ -232,6 +254,21 @@ export class ControlPlane {
       }
       const reasoningEffort = parseReasoning(body.reasoningEffort);
       const accountPolicies = parseAccountPolicies(body.accountPolicies, options.accounts);
+      const virtualCamera = body.virtualCamera === true;
+      const virtualCameraDevice = String(
+        body.virtualCameraDevice ?? options.virtualCameras[0]?.device ?? "/dev/video10",
+      );
+      if (
+        virtualCamera &&
+        !options.virtualCameras.some((entry) =>
+          entry.device === virtualCameraDevice && entry.writable
+        )
+      ) {
+        throw new HttpError(
+          400,
+          `Virtual camera ${virtualCameraDevice} is unavailable or not writable`,
+        );
+      }
       const currentDirectory = await readActiveRun(this.rootDirectory);
       if (currentDirectory) {
         const current = (await CheckpointStore.load(currentDirectory)).snapshot();
@@ -256,6 +293,8 @@ export class ControlPlane {
         goal,
         reasoningEffort,
         record: body.record !== false,
+        virtualCamera,
+        virtualCameraDevice,
         openDashboard: false,
         accountPolicies,
       });
@@ -338,15 +377,17 @@ export class ControlPlane {
 }
 
 async function loadOptions() {
-  const [games, accounts, models] = await Promise.all([
+  const [games, accounts, models, virtualCameras] = await Promise.all([
     discoverInstalledSteamGames(),
     discoverCodexAccounts(),
     discoverModels(),
+    discoverVirtualCameraDevices(),
   ]);
   return {
     games: games.map(({ executable: _executable, manifest: _manifest, ...game }) => game),
     accounts: accounts.map((account) => ({ id: account.id, email: account.email, label: path.basename(account.home) })),
     models,
+    virtualCameras,
   };
 }
 
@@ -449,13 +490,123 @@ async function stopAndCancel(checkpoint: RunCheckpoint): Promise<void> {
   await cancelChallenge(checkpoint.runDirectory).catch(() => undefined);
 }
 
-async function accountPoolSnapshot(checkpoint: RunCheckpoint | null): Promise<unknown> {
+async function accountPoolSnapshot(checkpoint: RunCheckpoint | null): Promise<AccountPoolState | null> {
   if (!checkpoint) return null;
   try {
-    return JSON.parse(await readFile(path.join(checkpoint.runDirectory, "account-pool.json"), "utf8"));
+    const value = JSON.parse(
+      await readFile(path.join(checkpoint.runDirectory, "account-pool.json"), "utf8"),
+    ) as AccountPoolState;
+    return value.version === 1 ? value : null;
   } catch {
     return null;
   }
+}
+
+function statusSnapshot(options: {
+  host: string;
+  port: number;
+  checkpoint: RunCheckpoint | null;
+  challenge: unknown;
+  accountPool: AccountPoolState | null;
+  virtualCameras: Awaited<ReturnType<typeof discoverVirtualCameraDevices>>;
+}) {
+  const checkpoint = options.checkpoint;
+  const accounts = options.accountPool?.accounts.map(publicAccountStatus) ?? [];
+  const currentAccount = accounts.find(
+    (account) => account.id === options.accountPool?.activeAccountId,
+  ) ?? null;
+  const futureResets = accounts.flatMap((account) => [
+    account.fiveHour.resetsAt,
+    account.weekly.resetsAt,
+    account.blockedUntil,
+  ]).filter((value): value is string =>
+    value !== null && Date.parse(value) > Date.now()
+  );
+  const fiveHourResets = accounts
+    .map((account) => account.fiveHour.resetsAt)
+    .filter((value): value is string =>
+      value !== null && Date.parse(value) > Date.now()
+    );
+  const earliestResetAt = earliestIso(futureResets);
+  const earliestFiveHourResetAt = earliestIso(fiveHourResets);
+  return {
+    generatedAt: new Date().toISOString(),
+    service: {
+      ok: true,
+      name: "astra-game-arena",
+      url: `http://${options.host}:${options.port}`,
+    },
+    challenge: {
+      active: checkpoint !== null && !isTerminal(checkpoint.phase),
+      runId: checkpoint?.runId ?? null,
+      phase: checkpoint?.phase ?? "idle",
+      attempt: checkpoint?.attempt ?? 0,
+      retryAt: checkpoint?.retryAt ?? null,
+      reason: checkpoint?.reason ?? null,
+      snapshot: options.challenge,
+    },
+    configuration: checkpoint?.options ?? null,
+    currentAccount,
+    accountPool: {
+      activeAccountId: options.accountPool?.activeAccountId ?? null,
+      accounts,
+      earliestResetAt,
+      earliestFiveHourResetAt,
+    },
+    earliestResetAt,
+    recording: recordingStatus(checkpoint),
+    virtualCamera: {
+      enabled: checkpoint?.options.virtualCamera ?? false,
+      active:
+        checkpoint?.options.virtualCamera === true && checkpoint.phase === "running",
+      device: checkpoint?.options.virtualCameraDevice ?? null,
+      available: options.virtualCameras.some((device) => device.writable),
+      devices: options.virtualCameras,
+    },
+  };
+}
+
+function publicAccountStatus(account: AccountUsageState) {
+  const nowMs = Date.now();
+  return {
+    id: account.id,
+    email: account.email,
+    label: path.basename(account.home),
+    reserveFiveHourPercent: account.reserveFiveHourPercent,
+    reserveWeeklyPercent: account.reserveWeeklyPercent,
+    fiveHour: publicRateWindow(account.primary, nowMs),
+    weekly: publicRateWindow(account.secondary, nowMs),
+    blockedUntil:
+      account.blockedUntilMs !== null && account.blockedUntilMs > nowMs
+        ? isoOrNull(account.blockedUntilMs)
+        : null,
+    updatedAt: account.updatedAt,
+  };
+}
+
+function publicRateWindow(window: RateWindowState, nowMs: number) {
+  const resetPassed =
+    window.resetsAtMs !== null && window.resetsAtMs <= nowMs;
+  const usedPercent = resetPassed ? 0 : window.usedPercent;
+  return {
+    usedPercent,
+    remainingPercent:
+      usedPercent === null ? null : Math.max(0, 100 - usedPercent),
+    resetsAt: resetPassed ? null : isoOrNull(window.resetsAtMs),
+  };
+}
+
+function isoOrNull(value: number | null): string | null {
+  return value === null || !Number.isFinite(value)
+    ? null
+    : new Date(value).toISOString();
+}
+
+function earliestIso(values: string[]): string | null {
+  if (values.length === 0) return null;
+  return values.reduce((earliest, value) =>
+    Date.parse(value) < Date.parse(earliest) ? value : earliest
+  );
 }
 
 function recordingStatus(checkpoint: RunCheckpoint | null) {
@@ -465,6 +616,16 @@ function recordingStatus(checkpoint: RunCheckpoint | null) {
     active: checkpoint.options.record && checkpoint.phase === "running",
     parts: checkpoint.recordings.length,
     production: path.join(checkpoint.runDirectory, "production", "challenge-production-so-far.mkv"),
+  };
+}
+
+function virtualCameraStatus(checkpoint: RunCheckpoint | null) {
+  if (!checkpoint) return { enabled: false, active: false, device: null };
+  return {
+    enabled: checkpoint.options.virtualCamera,
+    active:
+      checkpoint.options.virtualCamera && checkpoint.phase === "running",
+    device: checkpoint.options.virtualCameraDevice,
   };
 }
 

@@ -41,6 +41,8 @@ function checkpoint(phase: RunPhase): RunCheckpoint {
       port: 4317,
       reasoningEffort: "high",
       record: true,
+      virtualCamera: false,
+      virtualCameraDevice: "/dev/video10",
       openDashboard: false,
       isolateSaves: true,
       quotaWaitMs: 1,

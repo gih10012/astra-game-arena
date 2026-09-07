@@ -17,8 +17,12 @@ import {
 } from "./power.js";
 import { ControlPlane } from "./control-plane.js";
 
-const SERVICE_NAME = "astra-parabox-watchdog.service";
-const ASSEMBLY_SERVICE_NAME = "astra-parabox-assembler.service";
+const SERVICE_NAME = "astra-game-arena-watchdog.service";
+const ASSEMBLY_SERVICE_NAME = "astra-game-arena-assembler.service";
+const LEGACY_SERVICE_NAMES = [
+  "astra-parabox-watchdog.service",
+  "astra-parabox-assembler.service",
+] as const;
 const sessionVariables = [
   "DBUS_SESSION_BUS_ADDRESS",
   "XDG_RUNTIME_DIR",
@@ -200,6 +204,7 @@ WantedBy=default.target
       ...presentVariables,
     ]);
   }
+  await removeLegacyServices();
   await expectSystemctl(["daemon-reload"]);
   await expectSystemctl(["enable", SERVICE_NAME]);
   await expectSystemctl(["restart", SERVICE_NAME]);
@@ -233,6 +238,13 @@ IOSchedulingClass=idle
 WantedBy=default.target
 `;
   await writeFile(servicePath, unit, { mode: 0o644 });
+  await runCommand("systemctl", [
+    "--user", "disable", "--now", "astra-parabox-assembler.service",
+  ]);
+  await rm(
+    path.join(serviceDirectory, "astra-parabox-assembler.service"),
+    { force: true },
+  );
   await expectSystemctl(["daemon-reload"]);
   await expectSystemctl(["enable", "--now", ASSEMBLY_SERVICE_NAME]);
   return servicePath;
@@ -245,6 +257,7 @@ export async function uninstallWatchdogService(): Promise<void> {
     "--now",
     SERVICE_NAME,
     ASSEMBLY_SERVICE_NAME,
+    ...LEGACY_SERVICE_NAMES,
   ]);
   await rm(
     path.join(os.homedir(), ".config/systemd/user", SERVICE_NAME),
@@ -254,7 +267,24 @@ export async function uninstallWatchdogService(): Promise<void> {
     path.join(os.homedir(), ".config/systemd/user", ASSEMBLY_SERVICE_NAME),
     { force: true },
   );
+  for (const legacy of LEGACY_SERVICE_NAMES) {
+    await rm(path.join(os.homedir(), ".config/systemd/user", legacy), {
+      force: true,
+    });
+  }
   await expectSystemctl(["daemon-reload"]);
+}
+
+async function removeLegacyServices(): Promise<void> {
+  await runCommand("systemctl", [
+    "--user", "disable", "--now", ...LEGACY_SERVICE_NAMES,
+  ]);
+  const serviceDirectory = path.join(os.homedir(), ".config/systemd/user");
+  await Promise.all(
+    LEGACY_SERVICE_NAMES.map((name) =>
+      rm(path.join(serviceDirectory, name), { force: true })
+    ),
+  );
 }
 
 export async function watchdogServiceStatus(): Promise<{

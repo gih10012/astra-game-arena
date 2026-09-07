@@ -210,7 +210,34 @@ async function loadOptions() {
   modelSelect.value = state.options.defaults.model;
   byId("goal-input").value = state.options.defaults.goal;
   byId("record-toggle").checked = state.options.defaults.record;
+  byId("virtual-camera-toggle").checked = state.options.defaults.virtualCamera;
+  renderVirtualCameras();
   renderReasoningOptions(); renderAccounts(); updateGameDetail();
+}
+
+function renderVirtualCameras() {
+  const select = byId("virtual-camera-select");
+  const cameras = state.options?.virtualCameras || [];
+  select.replaceChildren(...cameras.map((camera) =>
+    new Option(`${camera.label} · ${camera.device}`, camera.device)
+  ));
+  if (!cameras.length) {
+    select.append(new Option("未检测到 V4L2 loopback 设备", "/dev/video10"));
+  }
+  select.value = cameras.some((camera) =>
+    camera.device === state.options.defaults.virtualCameraDevice
+  ) ? state.options.defaults.virtualCameraDevice : cameras[0]?.device || "/dev/video10";
+  byId("virtual-camera-toggle").disabled = !cameras.some((camera) => camera.writable);
+  byId("virtual-camera-detail").textContent = cameras.length
+    ? "输出正式片同款 1920×1080 / 30 fps 合成画面"
+    : "需要 v4l2loopback；实体摄像头不会被用作输出设备";
+  updateVirtualCameraControls();
+}
+
+function updateVirtualCameraControls() {
+  const enabled = byId("virtual-camera-toggle").checked &&
+    !byId("virtual-camera-toggle").disabled;
+  byId("virtual-camera-select").disabled = !enabled;
 }
 
 function renderReasoningOptions() {
@@ -270,6 +297,8 @@ async function submitChallenge(event) {
       reasoningEffort: byId("reasoning-select").value,
       goal: byId("goal-input").value,
       record: byId("record-toggle").checked,
+      virtualCamera: byId("virtual-camera-toggle").checked,
+      virtualCameraDevice: byId("virtual-camera-select").value,
       accountPolicies: accountPolicies(),
     });
     byId("configuration").hidden = true; byId("form-message").textContent = "";
@@ -298,6 +327,10 @@ async function refreshSupervisor() {
     byId("next-action").textContent = checkpoint?.retryAt ? `resume ${new Date(checkpoint.retryAt).toLocaleString()}` : checkpoint?.reason || "ready";
     byId("video-parts").textContent = String(state.supervisor.recording?.parts || 0);
     byId("recording-state").textContent = state.supervisor.recording?.active ? "REC LIVE" : state.supervisor.recording?.enabled ? "REC PAUSED" : "REC OFF";
+    const camera = state.supervisor.virtualCamera;
+    byId("virtual-camera-state").textContent = camera?.active
+      ? `LIVE ${camera.device}`
+      : camera?.enabled ? `PAUSED ${camera.device}` : "OFF";
     updateControls();
   } catch {
     byId("daemon-state").textContent = "RECONNECTING";
@@ -350,6 +383,7 @@ if (!compact) {
   byId("configuration-close").addEventListener("click", () => { byId("configuration").hidden = true; });
   byId("game-select").addEventListener("change", updateGameDetail);
   byId("model-select").addEventListener("change", renderReasoningOptions);
+  byId("virtual-camera-toggle").addEventListener("change", updateVirtualCameraControls);
   byId("challenge-form").addEventListener("submit", submitChallenge);
   byId("pause-button").addEventListener("click", () => postControl("pause").then(refreshSupervisor));
   byId("resume-button").addEventListener("click", () => postControl("resume").then(refreshSupervisor));

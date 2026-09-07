@@ -26,6 +26,8 @@ export interface PersistedRunOptions {
   game?: InstalledSteamGame;
   reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   record: boolean;
+  virtualCamera: boolean;
+  virtualCameraDevice: string;
   openDashboard: boolean;
   isolateSaves: boolean;
   codexHome?: string;
@@ -87,12 +89,31 @@ export class CheckpointStore {
   }
 
   static async load(runDirectory: string): Promise<CheckpointStore> {
-    const filename = path.join(path.resolve(runDirectory), CHECKPOINT_FILENAME);
+    const resolvedRunDirectory = path.resolve(runDirectory);
+    const filename = path.join(resolvedRunDirectory, CHECKPOINT_FILENAME);
     const value = JSON.parse(await readFile(filename, "utf8")) as RunCheckpoint;
-    if (value.version !== 1 || value.runDirectory !== path.resolve(runDirectory)) {
+    if (value.version !== 1) {
       throw new Error(`Invalid run checkpoint: ${filename}`);
     }
-    return new CheckpointStore(filename, value);
+    const relocated = value.runDirectory !== resolvedRunDirectory;
+    if (relocated) {
+      const relocatedRoot = path.resolve(resolvedRunDirectory, "../..");
+      const oldRelative = path.relative(
+        value.options.rootDirectory,
+        value.runDirectory,
+      );
+      const newRelative = path.relative(relocatedRoot, resolvedRunDirectory);
+      if (oldRelative !== newRelative || !newRelative.startsWith(`runs${path.sep}`)) {
+        throw new Error(`Invalid run checkpoint: ${filename}`);
+      }
+      value.runDirectory = resolvedRunDirectory;
+      value.options.rootDirectory = relocatedRoot;
+    }
+    value.options.virtualCamera ??= false;
+    value.options.virtualCameraDevice ??= "/dev/video10";
+    const store = new CheckpointStore(filename, value);
+    if (relocated) await store.update({});
+    return store;
   }
 
   snapshot(): RunCheckpoint {
@@ -138,7 +159,24 @@ export async function readActiveRun(
     const pointer = JSON.parse(
       await readFile(activeRunPath(rootDirectory), "utf8"),
     ) as ActiveRunPointer;
-    return pointer.version === 1 ? path.resolve(pointer.runDirectory) : null;
+    if (pointer.version !== 1) return null;
+    const original = path.resolve(pointer.runDirectory);
+    try {
+      await readFile(path.join(original, CHECKPOINT_FILENAME));
+      return original;
+    } catch {
+      const relocated = path.join(
+        path.resolve(rootDirectory),
+        "runs",
+        path.basename(original),
+      );
+      try {
+        await readFile(path.join(relocated, CHECKPOINT_FILENAME));
+        return relocated;
+      } catch {
+        return null;
+      }
+    }
   } catch {
     return null;
   }

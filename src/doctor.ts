@@ -13,6 +13,7 @@ import { runCommand } from "./command.js";
 import { parseParaboxSave } from "./save-parser.js";
 import { TARGET_LEVELS } from "./types.js";
 import { discoverInstalledSteamGames } from "./steam-catalog.js";
+import { discoverVirtualCameraDevices } from "./virtual-camera.js";
 
 export interface DoctorCheck {
   name: string;
@@ -116,6 +117,18 @@ export async function runDoctor(options: { codexHome?: string } = {}): Promise<D
     ok: installedGames.length > 0,
     detail: `${installedGames.length} candidate(s) detected`,
     required: true,
+  });
+
+  const virtualCameras = await discoverVirtualCameraDevices();
+  checks.push({
+    name: "V4L2 virtual camera (optional)",
+    ok: virtualCameras.some((camera) => camera.writable),
+    detail: virtualCameras.length > 0
+      ? virtualCameras.map((camera) =>
+          `${camera.device} (${camera.label}, ${camera.writable ? "writable" : "not writable"})`
+        ).join(", ")
+      : "not configured; install/load v4l2loopback to enable OBS/meeting output",
+    required: false,
   });
 
   const loginResult = await runCommand(CODEX_COMMAND, ["login", "status"], {

@@ -94,6 +94,8 @@ if (command === "doctor") {
     goal: stringArg(args, "--goal", "Complete all official levels in Patrick's Parabox."),
     reasoningEffort: reasoning,
     record: !args.includes("--no-record"),
+    virtualCamera: args.includes("--virtual-camera"),
+    virtualCameraDevice: stringArg(args, "--virtual-camera", "/dev/video10"),
     openDashboard: args.includes("--browser"),
     isolateSaves: !args.includes("--keep-saves"),
     quotaWaitMs: quotaWaitHours * 60 * 60 * 1_000,
@@ -205,7 +207,7 @@ Usage:
   game-arena demo [--port 4320] [--duration SECONDS] [--browser]
   game-arena smoke-model [--codex-home PATH]
   game-arena smoke-headless
-  game-arena run [--game APPID] [--goal TEXT] [--model MODEL] [--reasoning high] [--quota-wait-hours 5] [--codex-home PATH] [--no-record] [--foreground]
+  game-arena run [--game APPID] [--goal TEXT] [--model MODEL] [--reasoning high] [--quota-wait-hours 5] [--codex-home PATH] [--no-record] [--virtual-camera /dev/video10] [--foreground]
   game-arena resume <run-directory>
   game-arena cancel <run-directory>
   game-arena status

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rename } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -48,6 +48,8 @@ test("durably tracks an active resumable run", async () => {
       port: 4317,
       reasoningEffort: "high",
       record: true,
+      virtualCamera: false,
+      virtualCameraDevice: "/dev/video10",
       openDashboard: true,
       isolateSaves: true,
       quotaWaitMs: 18_000_000,
@@ -62,8 +64,16 @@ test("durably tracks an active resumable run", async () => {
   assert.equal(loaded.snapshot().phase, "waiting_quota");
   assert.equal(loaded.snapshot().elapsedMs, 1234);
 
-  await clearActiveRun(root, runDirectory);
-  assert.equal(await readActiveRun(root), null);
+  const renamedRoot = `${root}-renamed`;
+  await rename(root, renamedRoot);
+  const relocatedRun = path.join(renamedRoot, "runs", "one");
+  assert.equal(await readActiveRun(renamedRoot), relocatedRun);
+  const relocated = await CheckpointStore.load(relocatedRun);
+  assert.equal(relocated.snapshot().runDirectory, relocatedRun);
+  assert.equal(relocated.snapshot().options.rootDirectory, renamedRoot);
+
+  await clearActiveRun(renamedRoot, relocatedRun);
+  assert.equal(await readActiveRun(renamedRoot), null);
 });
 
 test("distinguishes a live runner from a reused PID", () => {

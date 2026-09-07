@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { lstat, readFile, readdir, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -45,7 +46,7 @@ export interface CodexRateLimits {
 
 export async function discoverCodexAccounts(
   root = process.env.ASTRA_CODEX_ACCOUNTS_ROOT ??
-    path.join(os.homedir(), ".codex-parabox-accounts"),
+    defaultAccountsRoot(),
 ): Promise<CodexAccountProfile[]> {
   let entries;
   try {
@@ -69,6 +70,12 @@ export async function discoverCodexAccounts(
     }
   }
   return profiles.sort((left, right) => left.email.localeCompare(right.email));
+}
+
+function defaultAccountsRoot(): string {
+  const generic = path.join(os.homedir(), ".codex-game-arena-accounts");
+  const legacy = path.join(os.homedir(), ".codex-parabox-accounts");
+  return existsSync(generic) ? generic : legacy;
 }
 
 export async function inheritCodexConfiguration(

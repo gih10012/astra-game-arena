@@ -42,6 +42,7 @@ The current implementation targets Linux with:
 - Patrick's Parabox (Steam app `1260520`)
 - Cage with its headless wlroots backend and Xwayland
 - Xvfb, `xprop`, `wlr-randr`, `grim`, FFmpeg, Steam, Google Chrome, a C compiler, and X11/XTest headers
+- optional: `v4l2loopback` for presenting the live production layout as a virtual camera
 
 On Arch Linux the additional runtime packages are:
 
@@ -59,7 +60,7 @@ npm run doctor
 
 By default, the harness uses `~/.codex-official` when that directory contains `auth.json`, then falls back to the normal Codex home. Override it with `--codex-home PATH` or `ASTRA_CODEX_HOME`. Credentials are never copied into run artifacts.
 
-If two or more separately authenticated homes exist under `~/.codex-parabox-accounts/<label>/auth.json`, the runner enables its resumable account pool. The same Codex thread is synchronized through `codex-proxy` when accounts rotate. The control page lets you enable accounts and set independent five-hour and weekly reserve percentages. The scheduler prefers a recently reset account, proactively snapshots before switching, and waits when every enabled account is below its configured reserve. `runs/<run-id>/account-pool.json` records only scheduling telemetry; authentication files remain outside the repository. Multi-account use is disclosed in the audit trail.
+If two or more separately authenticated homes exist under `~/.codex-game-arena-accounts/<label>/auth.json`, the runner enables its resumable account pool. The legacy `~/.codex-parabox-accounts` location is still discovered automatically so existing credentials are not lost. The same Codex thread is synchronized through `codex-proxy` when accounts rotate. The control page lets you enable accounts and set independent five-hour and weekly reserve percentages. The scheduler prefers a recently reset account, proactively snapshots before switching, and waits when every enabled account is below its configured reserve. `runs/<run-id>/account-pool.json` records only scheduling telemetry; authentication files remain outside the repository. Multi-account use is disclosed in the audit trail.
 
 Validate authentication and the arena MCP tools with a small, non-challenge turn before touching saves:
 
@@ -98,7 +99,7 @@ is available continuously at `http://127.0.0.1:4317` as soon as the watchdog is 
 follow startup and resume logs with:
 
 ```bash
-journalctl --user -u astra-parabox-watchdog.service -f
+journalctl --user -u astra-game-arena-watchdog.service -f
 ```
 
 The service starts with the user systemd manager and watches the single active run. During a quota wait the recorder and active timer stop, while the hidden game/controller process remains alive; the same in-memory game state and Codex thread resume when the reset deadline passes. A normal OS suspend freezes that process and continues from the same state on wake. A reboot cannot preserve Wine/GPU RAM, so the watchdog relaunches from the durable game save and resumes the persisted Codex `thread_id`. The next recording part first holds the last compositor snapshot while the title screen is handled behind it, then switches to the restored live frame; the title page therefore appears only in the initial part. If the deadline passed while asleep or powered off, the first wake/boot poll resumes immediately. The watchdog does not wait for niri or another physical compositor.
@@ -115,6 +116,7 @@ Defaults:
 - completion: agent-declared success for the configured goal (Parabox referee reports `364/364`)
 - prompt: generated from the configured natural-language goal and isolated computer-use tools
 - recording: 1920×1080, 30 FPS Matroska parts from private displays
+- virtual camera: optional 1920×1080, 30 FPS V4L2 output with the same game/session layout
 - UI: native game at 1280×1080, director dashboard at 640×1080
 - physical desktop windows: none by default; `--browser` opens only the monitoring dashboard
 - native web search and network browsers: disabled
@@ -132,6 +134,7 @@ node dist/src/cli.js run --reasoning xhigh
 node dist/src/cli.js run --quota-wait-hours 5
 node dist/src/cli.js run --codex-home ~/.codex-official
 node dist/src/cli.js run --no-record
+node dist/src/cli.js run --virtual-camera /dev/video10
 node dist/src/cli.js run --browser
 node dist/src/cli.js run --foreground
 node dist/src/cli.js status
@@ -160,7 +163,19 @@ The loopback director server exposes:
 - `GET /api/challenge/time` — official monotonic elapsed time
 - `GET /api/challenge/tokens` — cumulative input, cached input, output, reasoning output, and total tokens
 - `GET /api/challenge` — dashboard snapshot, including referee-only visible progress
+- `GET /api/status` — complete active configuration, current account five-hour/weekly used and remaining percentages, every account's sanitized telemetry, the earliest pool reset, recording state, and virtual-camera state
 - `GET /api/events` — Server-Sent Events for state and transcript updates
+
+## Optional virtual camera
+
+The control page lists only writable V4L2 loopback outputs, never physical webcams. On Arch Linux, create one before starting the arena:
+
+```bash
+sudo pacman -S v4l2loopback-dkms
+sudo modprobe v4l2loopback video_nr=10 card_label="Astra Game Arena" exclusive_caps=1
+```
+
+Then enable **输出虚拟摄像头** in the challenge settings (or pass `--virtual-camera /dev/video10`). OBS, Tencent Meeting, and other V4L2 clients can select **Astra Game Arena**. The output is live-only and independent of the on-disk recording toggle. `npm run doctor` reports whether a writable loopback device is ready.
 
 Codex receives matching MCP tools named `challenge_time` and `challenge_tokens`, plus `observe_screen`, `press_keys`, `type_text`, `mouse`, and `complete_challenge`. Referee progress is viewer-only and is not returned to the model.
 
