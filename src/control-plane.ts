@@ -165,6 +165,7 @@ export class ControlPlane {
           gameAppId: "1260520",
           goal: "Complete all official levels in Patrick's Parabox.",
           gpuPreference: "auto",
+          offlineMode: false,
           model: "gpt-6-astra",
           reasoningEffort: "high",
           record: true,
@@ -295,6 +296,7 @@ export class ControlPlane {
         model,
         goal,
         gpuPreference,
+        offlineMode: body.offlineMode === true,
         reasoningEffort,
         record: body.record !== false,
         virtualCamera,
@@ -591,6 +593,7 @@ function configurationStatus(
     game: configured?.game ?? null,
     gameAppId: configured?.game?.appId ?? "1260520",
     gpuPreference: configured?.gpuPreference ?? "auto",
+    offlineMode: configured?.offlineMode ?? false,
     goal:
       configured?.goal ?? "Complete all official levels in Patrick's Parabox.",
     model: configured?.model ?? "gpt-6-astra",

@@ -8,7 +8,15 @@ import {
   continuousGameRecorderArguments,
   dashboardRecorderArguments,
   freeXDisplay,
+  gameLaunchStrategy,
 } from "../src/headless-display.js";
+
+test("selects a no-Steam direct launch only when offline mode is enabled", () => {
+  assert.equal(gameLaunchStrategy({ appId: "289070" }), "steam-managed");
+  assert.equal(gameLaunchStrategy({ appId: "289070" }, true), "direct-offline");
+  assert.equal(gameLaunchStrategy({ appId: "1260520" }), "direct-steam-assisted");
+  assert.equal(gameLaunchStrategy({ appId: "1260520" }, true), "direct-offline");
+});
 
 test("maps discrete GPU selection to PRIME offload variables", () => {
   const environment: NodeJS.ProcessEnv = {};

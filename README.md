@@ -112,6 +112,7 @@ Defaults:
 
 - model: `gpt-6-astra`
 - launcher: `codex-proxy` (local port 7890 proxy and official auth profile)
+- game launch: Steam-managed by default; optional direct offline launch starts no Steam process
 - reasoning effort: `high`
 - completion: agent-declared success for the configured goal (Parabox referee reports `364/364`)
 - prompt: generated from the configured natural-language goal and isolated computer-use tools
@@ -133,6 +134,7 @@ Useful variants:
 node dist/src/cli.js run --reasoning xhigh
 node dist/src/cli.js run --quota-wait-hours 5
 node dist/src/cli.js run --codex-home ~/.codex-official
+node dist/src/cli.js run --offline
 node dist/src/cli.js run --no-record
 node dist/src/cli.js run --virtual-camera /dev/video10
 node dist/src/cli.js run --browser
@@ -153,6 +155,12 @@ duration and ordered parts are directly concatenable. The active challenge
 timer excludes quota, power, suspend, and reboot downtime and resumes from its checkpoint;
 the final summary also reports total wall time, inactive time, attempt count,
 and whether the run was `continuous` or `resumed`.
+
+`--offline` is a true direct-launch mode: Windows executables run through
+Proton and native Linux executables run directly, without starting or logging
+in to Steam. It is suitable only for games that do not require Steamworks or
+Steam DRM; launch failures remain visible in the director transcript and run
+logs. The same option is available as **直接离线启动** in the control page.
 
 Run artifacts are written under `runs/` and ignored by Git. Interrupted recording parts remain independently playable. At every sealed snapshot boundary, the runner atomically refreshes `production/challenge-production-so-far.mkv`; an independent assembler service applies the same operation to a runner that was already active during an upgrade. It cuts each resumed part at the recorded active-time boundary, normalizes that part once, then stream-copies the normalized parts into the cumulative video. `assemble` performs the operation on demand without touching an open part. On completion the output is `production/challenge-complete.mkv`. Non-destructive repaired release copies take precedence over damaged originals. Each completed run ends with a SHA-256 manifest. Keep the raw artifacts next to the published video or release them separately; do not commit game frames or save files to this repository.
 

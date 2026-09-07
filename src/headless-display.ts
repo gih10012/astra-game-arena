@@ -30,11 +30,23 @@ export interface VirtualDashboardRuntime {
   close(): Promise<void>;
 }
 
+export type GameLaunchStrategy = "direct-offline" | "direct-steam-assisted" | "steam-managed";
+
+export function gameLaunchStrategy(
+  game: Pick<InstalledSteamGame, "appId">,
+  offlineMode = false,
+): GameLaunchStrategy {
+  if (offlineMode) return "direct-offline";
+  if (game.appId === "1260520") return "direct-steam-assisted";
+  return "steam-managed";
+}
+
 export async function startVirtualGame(options: {
   rootDirectory: string;
   runtimeDirectory: string;
   game: InstalledSteamGame;
   gpuPreference?: "auto" | "integrated" | "discrete";
+  offlineMode?: boolean;
 }): Promise<VirtualGameRuntime> {
   await mkdir(options.runtimeDirectory, { recursive: true });
   const xvfb = await resolveTool(
@@ -47,11 +59,16 @@ export async function startVirtualGame(options: {
     process.env.ASTRA_CAGE,
     path.join(options.rootDirectory, ".arena/tools/cage-root/usr/bin/cage"),
   );
-  // Patrick's Parabox is known to tolerate a direct Proton launch.  Most other
-  // Steam games (including Civilization VI) require the real Steam client to
-  // launch them so steamclient/DRM is connected inside the same private display.
-  const directProtonLaunch = options.game.platform === "windows" && options.game.appId === "1260520";
-  const proton = directProtonLaunch ? await resolveProton() : null;
+  // Parabox has a verified direct-Proton adapter.  Offline mode deliberately
+  // extends that direct launch to any selected game and never starts Steam;
+  // Steamworks/DRM-dependent titles are expected to reject that mode cleanly.
+  const launchStrategy = gameLaunchStrategy(options.game, options.offlineMode);
+  const steamEnabled = launchStrategy !== "direct-offline";
+  const directExecutableLaunch = launchStrategy !== "steam-managed";
+  const steamManagedLaunch = launchStrategy === "steam-managed";
+  const proton = options.game.platform === "windows" && directExecutableLaunch
+    ? await resolveProton()
+    : null;
   const keypressCommand = await ensureKeypressHelper(options.rootDirectory);
   const anchorCommand = await ensureX11Anchor(options.rootDirectory);
   const environmentFile = path.join(options.runtimeDirectory, "headless-environment.json");
@@ -129,65 +146,66 @@ export async function startVirtualGame(options: {
         "Steam is already running. Close it before a headless challenge so it cannot forward the game to the physical desktop.",
       );
     }
-    let steamXvfbProcess: ChildProcess | null = null;
-    const steamEnvironment: NodeJS.ProcessEnv = {
-      ...childEnvironment,
-      SteamAppId: options.game.appId,
-      SteamGameId: options.game.appId,
-      PROTON_LOG: "1",
-      PROTON_LOG_DIR: options.runtimeDirectory,
-    };
-    if (directProtonLaunch) {
-      const steamDisplay = await freeXDisplay(170, 199);
-      steamXvfbProcess = spawn(
-        xvfb,
-        [steamDisplay, "-screen", "0", "1024x768x24", "-br", "-nolisten", "tcp", "-noreset"],
-        { detached: true, stdio: ["ignore", "pipe", "pipe"] },
-      );
-      logChildOutput(
-        steamXvfbProcess,
-        path.join(options.runtimeDirectory, "steam-xvfb.log"),
-      );
-      childProcesses.push(steamXvfbProcess);
-      await waitForXDisplay(steamDisplay, steamXvfbProcess, 15_000);
-      steamEnvironment.DISPLAY = steamDisplay;
-    }
-    // Force Steam and its game child onto Cage's nested Xwayland display.  In
-    // particular, do not let a native Wayland Steam client discover niri.
-    delete steamEnvironment.WAYLAND_DISPLAY;
-    const steamArguments = [
-      "-inhibitbootstrap",
-      "-skipinitialbootstrap",
-      "-nobootstrapperupdate",
-      "-noverifyfiles",
-      "-silent",
-    ];
-    const steamProcess = spawn("steam", steamArguments, {
-      env: steamEnvironment,
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    logChildOutput(steamProcess, path.join(options.runtimeDirectory, "steam.log"));
-    childProcesses.push(steamProcess);
-    await waitForSteamReady(steamProcess, 30 * 60_000);
-
-    // Sending -applaunch during a cold Steam startup can be replayed by both
-    // the updater and the final client, yielding a spurious "game is already
-    // running" dialog.  Hand it to the already-running client exactly once.
-    if (!directProtonLaunch) {
-      await delay(5_000);
-      const launchProcess = spawn("steam", [
-        "-applaunch", options.game.appId,
-        "-screen-fullscreen", "0",
-        "-screen-width", String(GAME_WIDTH),
-        "-screen-height", String(VIDEO_HEIGHT),
+    let steamProcess: ChildProcess | null = null;
+    let steamEnvironment: NodeJS.ProcessEnv | null = null;
+    if (steamEnabled) {
+      steamEnvironment = {
+        ...childEnvironment,
+        SteamAppId: options.game.appId,
+        SteamGameId: options.game.appId,
+        PROTON_LOG: "1",
+        PROTON_LOG_DIR: options.runtimeDirectory,
+      };
+      if (directExecutableLaunch) {
+        const steamDisplay = await freeXDisplay(170, 199);
+        const steamXvfbProcess = spawn(
+          xvfb,
+          [steamDisplay, "-screen", "0", "1024x768x24", "-br", "-nolisten", "tcp", "-noreset"],
+          { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+        );
+        logChildOutput(
+          steamXvfbProcess,
+          path.join(options.runtimeDirectory, "steam-xvfb.log"),
+        );
+        childProcesses.push(steamXvfbProcess);
+        await waitForXDisplay(steamDisplay, steamXvfbProcess, 15_000);
+        steamEnvironment.DISPLAY = steamDisplay;
+      }
+      // Force Steam and its game child onto a private X display.  In
+      // particular, do not let a native Wayland Steam client discover niri.
+      delete steamEnvironment.WAYLAND_DISPLAY;
+      steamProcess = spawn("steam", [
+        "-inhibitbootstrap",
+        "-skipinitialbootstrap",
+        "-nobootstrapperupdate",
+        "-noverifyfiles",
+        "-silent",
       ], {
         env: steamEnvironment,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
-      logChildOutput(launchProcess, path.join(options.runtimeDirectory, "steam-launch.log"));
-      childProcesses.push(launchProcess);
+      logChildOutput(steamProcess, path.join(options.runtimeDirectory, "steam.log"));
+      childProcesses.push(steamProcess);
+      await waitForSteamReady(steamProcess, 30 * 60_000);
+
+      // Sending -applaunch during a cold Steam startup can be replayed by both
+      // the updater and the final client.  Hand it to the ready client once.
+      if (steamManagedLaunch) {
+        await delay(5_000);
+        const launchProcess = spawn("steam", [
+          "-applaunch", options.game.appId,
+          "-screen-fullscreen", "0",
+          "-screen-width", String(GAME_WIDTH),
+          "-screen-height", String(VIDEO_HEIGHT),
+        ], {
+          env: steamEnvironment,
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        logChildOutput(launchProcess, path.join(options.runtimeDirectory, "steam-launch.log"));
+        childProcesses.push(launchProcess);
+      }
     }
 
     const steamRoot = path.join(process.env.HOME ?? "", ".local/share/Steam");
@@ -201,16 +219,15 @@ export async function startVirtualGame(options: {
       PROTON_LOG_DIR: options.runtimeDirectory,
     };
     let gameProcess: ChildProcess | null = null;
-    if (directProtonLaunch) {
+    if (directExecutableLaunch) {
       gameProcess = spawn(
-        proton!,
-        [
-          "run",
-          options.game.executable,
+        proton ?? options.game.executable,
+        proton ? [
+          "run", options.game.executable,
           "-screen-fullscreen", "0",
           "-screen-width", String(GAME_WIDTH),
           "-screen-height", String(VIDEO_HEIGHT),
-        ],
+        ] : [],
         {
           env: gameEnvironment,
           cwd: options.game.installDirectory,
@@ -224,7 +241,7 @@ export async function startVirtualGame(options: {
       if (gameProcess.exitCode !== null) {
         throw new Error(
           `Game process exited before creating a window (code=${gameProcess.exitCode}); ` +
-            `see ${path.join(options.runtimeDirectory, `steam-${options.game.appId}.log`)}`,
+            `see ${path.join(options.runtimeDirectory, "game.log")}`,
         );
       }
     }
@@ -250,11 +267,13 @@ export async function startVirtualGame(options: {
             timeoutMs: 5_000,
           }).catch(() => undefined);
         }
-        await runCommand("steam", ["-shutdown"], {
-          env: steamEnvironment,
-          timeoutMs: 5_000,
-        }).catch(() => undefined);
-        stopProcessGroup(steamProcess, "SIGTERM");
+        if (steamProcess && steamEnvironment) {
+          await runCommand("steam", ["-shutdown"], {
+            env: steamEnvironment,
+            timeoutMs: 5_000,
+          }).catch(() => undefined);
+          stopProcessGroup(steamProcess, "SIGTERM");
+        }
         stopProcessGroup(cageProcess, "SIGTERM");
         await delay(1_000);
         for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");

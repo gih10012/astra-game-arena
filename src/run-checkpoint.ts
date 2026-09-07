@@ -25,6 +25,7 @@ export interface PersistedRunOptions {
   goal?: string;
   game?: InstalledSteamGame;
   gpuPreference: "auto" | "integrated" | "discrete";
+  offlineMode?: boolean;
   reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   record: boolean;
   virtualCamera: boolean;
@@ -113,6 +114,7 @@ export class CheckpointStore {
     value.options.virtualCamera ??= false;
     value.options.virtualCameraDevice ??= "/dev/video10";
     value.options.gpuPreference ??= "auto";
+    value.options.offlineMode ??= false;
     const store = new CheckpointStore(filename, value);
     if (relocated) await store.update({});
     return store;

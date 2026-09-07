@@ -210,6 +210,7 @@ async function loadOptions() {
   modelSelect.value = state.options.defaults.model;
   byId("goal-input").value = state.options.defaults.goal;
   byId("gpu-select").value = state.options.defaults.gpuPreference;
+  byId("offline-mode-toggle").checked = state.options.defaults.offlineMode;
   byId("record-toggle").checked = state.options.defaults.record;
   byId("virtual-camera-toggle").checked = state.options.defaults.virtualCamera;
   renderVirtualCameras();
@@ -295,6 +296,7 @@ async function submitChallenge(event) {
     await postControl("start", {
       gameAppId: byId("game-select").value,
       gpuPreference: byId("gpu-select").value,
+      offlineMode: byId("offline-mode-toggle").checked,
       model: byId("model-select").value,
       reasoningEffort: byId("reasoning-select").value,
       goal: byId("goal-input").value,

@@ -92,6 +92,7 @@ if (command === "doctor") {
     model: stringArg(args, "--model", "gpt-6-astra"),
     gameAppId: stringArg(args, "--game", "1260520"),
     gpuPreference: stringArg(args, "--gpu", "auto") as "auto" | "integrated" | "discrete",
+    offlineMode: args.includes("--offline"),
     goal: stringArg(args, "--goal", "Complete all official levels in Patrick's Parabox."),
     reasoningEffort: reasoning,
     record: !args.includes("--no-record"),

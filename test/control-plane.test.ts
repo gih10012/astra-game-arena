@@ -26,6 +26,7 @@ test("serves the durable control page with every pre-run setting", async (contex
   for (const id of [
     "game-select",
     "gpu-select",
+    "offline-mode-toggle",
     "goal-input",
     "record-toggle",
     "virtual-camera-toggle",
@@ -47,6 +48,7 @@ test("serves the durable control page with every pre-run setting", async (contex
   assert.equal(status.configuration.source, "defaults");
   assert.equal(status.configuration.record, true);
   assert.equal(status.configuration.virtualCamera, false);
+  assert.equal(status.configuration.offlineMode, false);
   assert.equal(status.currentAccount, null);
   assert.equal(status.earliestResetAt, null);
   assert.equal(status.virtualCamera.enabled, false);
@@ -90,6 +92,7 @@ test("reports active configuration, account percentages, and earliest reset", as
       model: "gpt-6-astra",
       goal: "Complete the game",
       gpuPreference: "discrete",
+      offlineMode: true,
       reasoningEffort: "high",
       record: true,
       virtualCamera: true,
@@ -126,6 +129,7 @@ test("reports active configuration, account percentages, and earliest reset", as
 
   assert.equal(status.configuration.model, "gpt-6-astra");
   assert.equal(status.configuration.gpuPreference, "discrete");
+  assert.equal(status.configuration.offlineMode, true);
   assert.equal(status.configuration.source, "active-run");
   assert.equal(status.configuration.virtualCamera, true);
   assert.equal(status.currentAccount.email, "one@example.com");
