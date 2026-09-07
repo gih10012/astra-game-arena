@@ -80,6 +80,7 @@ export function virtualCameraFfmpegArguments(options: {
 
 export function virtualCameraGameRecorderArguments(outputName: string): string[] {
   return [
+    "-y",
     "-D",
     "-r", String(FPS),
     "--no-dmabuf",
