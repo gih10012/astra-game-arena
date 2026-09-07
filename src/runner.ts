@@ -40,6 +40,7 @@ import {
   type VirtualGameMirrorRuntime,
 } from "./headless-display.js";
 import { RolloutTailer } from "./rollout-tailer.js";
+import { assembleRecordings, type RecordingAssembly } from "./recording-assembly.js";
 import {
   CheckpointStore,
   checkpointPath,
@@ -317,6 +318,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let outcomePhase: RunPhase = "waiting_retry";
   let retryAt: string | null = null;
   let reason: string | null = null;
+  let productionVideo: RecordingAssembly | null = null;
 
   const stopRecording = async () => {
     const activeRecorder = recorder;
@@ -339,6 +341,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       `challenge-part-${currentPart}.mkv`,
     );
     const recordingPath = path.join(runDirectory, recordingRelative);
+    const captureStartedAt = new Date().toISOString();
     recorder = spawn(
       "ffmpeg",
       hiddenRecorderArguments({
@@ -367,6 +370,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       dimensions: "1920x1080",
       framesPerSecond: 30,
       timestampMode: "frame-count",
+      captureStartedAt,
       filename: recordingRelative,
     });
   };
@@ -776,6 +780,14 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           runtimePreserved: true,
           snapshot: waitingSnapshot,
         });
+        if (prior.options.record) {
+          try {
+            productionVideo = await assembleRecordings(runDirectory);
+            await audit.append("recording.assembled", productionVideo);
+          } catch (error) {
+            await audit.append("recording.assembly.warning", String(error));
+          }
+        }
         activeController.publishTranscript({
           type: "runner.waiting",
           phase: outcomePhase,
@@ -937,6 +949,14 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         pid: null,
         pidStartTicks: null,
       });
+      if (prior.options.record) {
+        try {
+          productionVideo = await assembleRecordings(runDirectory);
+          await audit.append("recording.assembled", productionVideo);
+        } catch (error) {
+          await audit.append("recording.assembly.warning", String(error));
+        }
+      }
       await audit.append("challenge.finished", snapshot);
       await audit.finalize({
         ...snapshot,
@@ -948,6 +968,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           Date.now() - Date.parse(prior.createdAt) - snapshot.time.elapsedMs,
         ),
         recordings: checkpointStore.snapshot().recordings,
+        productionVideo,
         savesRestored: restored,
       });
       await clearActiveRun(rootDirectory, runDirectory);

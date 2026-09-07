@@ -31,7 +31,7 @@ The dashboard does not send commands and is not visible to the model.
 1. Confirm `summary.json` says `completed`, `364/364`, and `savesRestored: true`; disclose its `continuous` or `resumed` classification.
 2. Run the test suite again at the exact commit used for the challenge.
 3. Verify `manifest.sha256.json` against the artifacts.
-4. Concatenate the ordered `recordings/challenge-part-*.mkv` files, then transcode the result to the platform delivery format; retain every original part. New parts start at PTS zero and use the same 30 FPS H.264 format. If a legacy part predates frame-count timestamp regeneration, use its non-destructive repaired-timeline copy documented beside the recordings.
+4. Verify `production/assembly.json` and use `production/challenge-complete.mkv` as the edit master, then transcode it to the platform delivery format; retain every original part. The assembler cuts resumed parts at their recorded active-time/snapshot boundary, normalizes each sealed part once, and atomically concatenates them. If a legacy part predates frame-count timestamp regeneration, its documented non-destructive repair copy is selected automatically.
 5. Put the repository commit SHA, model, effort, Codex version, timer, token breakdown, prompt, and artifact manifest hash in the video description.
 6. Review raw logs, save files, browser profile, and frames before publishing. Do not upload credentials, local paths that reveal private information, or proprietary game data beyond footage permitted by the rights holder/platform.
 

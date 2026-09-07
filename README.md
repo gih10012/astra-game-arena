@@ -126,6 +126,7 @@ node dist/src/cli.js run --no-record
 node dist/src/cli.js run --browser
 node dist/src/cli.js run --foreground
 node dist/src/cli.js status
+node dist/src/cli.js assemble
 node dist/src/cli.js resume runs/<run-id>
 node dist/src/cli.js cancel runs/<run-id>
 node dist/src/cli.js restore runs/<run-id>/save-recovery.json
@@ -141,7 +142,7 @@ timer excludes quota, power, suspend, and reboot downtime and resumes from its c
 the final summary also reports total wall time, inactive time, attempt count,
 and whether the run was `continuous` or `resumed`.
 
-Run artifacts are written under `runs/` and ignored by Git. Interrupted recording parts remain independently playable; concatenate them only after completion. Each completed run ends with a SHA-256 manifest. Keep the raw artifacts next to the published video or release them separately; do not commit game frames or save files to this repository.
+Run artifacts are written under `runs/` and ignored by Git. Interrupted recording parts remain independently playable. At every sealed snapshot boundary, the runner atomically refreshes `production/challenge-production-so-far.mkv`; an independent assembler service applies the same operation to a runner that was already active during an upgrade. It cuts each resumed part at the recorded active-time boundary, normalizes that part once, then stream-copies the normalized parts into the cumulative video. `assemble` performs the operation on demand without touching an open part. On completion the output is `production/challenge-complete.mkv`. Non-destructive repaired release copies take precedence over damaged originals. Each completed run ends with a SHA-256 manifest. Keep the raw artifacts next to the published video or release them separately; do not commit game frames or save files to this repository.
 
 ## Public interfaces
 

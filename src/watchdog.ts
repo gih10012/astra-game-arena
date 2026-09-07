@@ -17,6 +17,7 @@ import {
 } from "./power.js";
 
 const SERVICE_NAME = "astra-parabox-watchdog.service";
+const ASSEMBLY_SERVICE_NAME = "astra-parabox-assembler.service";
 const sessionVariables = [
   "DBUS_SESSION_BUS_ADDRESS",
   "XDG_RUNTIME_DIR",
@@ -200,10 +201,52 @@ WantedBy=default.target
   return servicePath;
 }
 
+export async function installAssemblyService(
+  rootDirectory: string,
+): Promise<string> {
+  const root = path.resolve(rootDirectory);
+  const serviceDirectory = path.join(os.homedir(), ".config/systemd/user");
+  const servicePath = path.join(serviceDirectory, ASSEMBLY_SERVICE_NAME);
+  const cliEntry = path.join(root, "dist/src/cli.js");
+  await mkdir(serviceDirectory, { recursive: true });
+  const unit = `[Unit]
+Description=Astra Parabox snapshot-boundary video assembler
+After=default.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=${systemdPath(root)}
+ExecStart=${systemdQuote(process.execPath)} ${systemdQuote(cliEntry)} assembly-daemon
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target
+`;
+  await writeFile(servicePath, unit, { mode: 0o644 });
+  await expectSystemctl(["daemon-reload"]);
+  await expectSystemctl(["enable", "--now", ASSEMBLY_SERVICE_NAME]);
+  return servicePath;
+}
+
 export async function uninstallWatchdogService(): Promise<void> {
-  await runCommand("systemctl", ["--user", "disable", "--now", SERVICE_NAME]);
+  await runCommand("systemctl", [
+    "--user",
+    "disable",
+    "--now",
+    SERVICE_NAME,
+    ASSEMBLY_SERVICE_NAME,
+  ]);
   await rm(
     path.join(os.homedir(), ".config/systemd/user", SERVICE_NAME),
+    { force: true },
+  );
+  await rm(
+    path.join(os.homedir(), ".config/systemd/user", ASSEMBLY_SERVICE_NAME),
     { force: true },
   );
   await expectSystemctl(["daemon-reload"]);
@@ -213,6 +256,9 @@ export async function watchdogServiceStatus(): Promise<{
   service: string;
   active: boolean;
   enabled: boolean;
+  assemblerService: string;
+  assemblerActive: boolean;
+  assemblerEnabled: boolean;
 }> {
   const active = await runCommand("systemctl", [
     "--user",
@@ -224,10 +270,23 @@ export async function watchdogServiceStatus(): Promise<{
     "is-enabled",
     SERVICE_NAME,
   ]);
+  const assemblerActive = await runCommand("systemctl", [
+    "--user",
+    "is-active",
+    ASSEMBLY_SERVICE_NAME,
+  ]);
+  const assemblerEnabled = await runCommand("systemctl", [
+    "--user",
+    "is-enabled",
+    ASSEMBLY_SERVICE_NAME,
+  ]);
   return {
     service: SERVICE_NAME,
     active: active.code === 0,
     enabled: enabled.code === 0,
+    assemblerService: ASSEMBLY_SERVICE_NAME,
+    assemblerActive: assemblerActive.code === 0,
+    assemblerEnabled: assemblerEnabled.code === 0,
   };
 }
 

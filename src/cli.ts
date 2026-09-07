@@ -11,6 +11,10 @@ import { runModelSmoke } from "./model-smoke.js";
 import { CheckpointStore, readActiveRun } from "./run-checkpoint.js";
 import { restoreFromRecovery } from "./save-guard.js";
 import {
+  assembleRecordings,
+  runAssemblyWatcher,
+} from "./recording-assembly.js";
+import {
   cancelChallenge,
   queueChallenge,
   resumeChallenge,
@@ -19,6 +23,7 @@ import {
 } from "./runner.js";
 import { TARGET_LEVELS } from "./types.js";
 import {
+  installAssemblyService,
   installWatchdogService,
   runWatchdog,
   uninstallWatchdogService,
@@ -178,24 +183,52 @@ if (command === "doctor") {
   await runWatchdog(rootDirectory, {
     pollMs: numberArg(args, "--poll-seconds", 1) * 1_000,
   });
+} else if (command === "assembly-daemon") {
+  await runAssemblyWatcher(rootDirectory, {
+    pollMs: numberArg(args, "--poll-seconds", 10) * 1_000,
+  });
 } else if (command === "service") {
   const action = args[0] ?? "status";
   if (action === "install") {
+    await installAssemblyService(rootDirectory);
     const servicePath = await installWatchdogService(rootDirectory);
     console.log(`Installed and started: ${servicePath}`);
+  } else if (action === "install-assembler") {
+    const servicePath = await installAssemblyService(rootDirectory);
+    console.log(`Installed and started without restarting the challenge: ${servicePath}`);
   } else if (action === "uninstall") {
     await uninstallWatchdogService();
     console.log("Watchdog service removed.");
   } else if (action === "status") {
     console.log(JSON.stringify(await watchdogServiceStatus(), null, 2));
   } else {
-    throw new Error("Usage: parabox-arena service install|status|uninstall");
+    throw new Error(
+      "Usage: parabox-arena service install|install-assembler|status|uninstall",
+    );
   }
 } else if (command === "status") {
   const active = await readActiveRun(rootDirectory);
   console.log(
     JSON.stringify(
       active ? (await CheckpointStore.load(active)).snapshot() : { active: false },
+      null,
+      2,
+    ),
+  );
+} else if (command === "assemble") {
+  const positional = args.find((argument, index) =>
+    !argument.startsWith("--") && args[index - 1] !== "--output"
+  );
+  const runDirectory = positional
+    ? path.resolve(positional)
+    : await readActiveRun(rootDirectory);
+  if (!runDirectory) {
+    throw new Error("Usage: parabox-arena assemble [run-directory] [--output PATH]");
+  }
+  const requestedOutput = optionalPathArg(args, "--output");
+  console.log(
+    JSON.stringify(
+      await assembleRecordings(runDirectory, requestedOutput),
       null,
       2,
     ),
@@ -226,8 +259,10 @@ Usage:
   parabox-arena resume <run-directory>
   parabox-arena cancel <run-directory>
   parabox-arena status
+  parabox-arena assemble [run-directory] [--output PATH]
   parabox-arena daemon [--poll-seconds 1]
-  parabox-arena service install|status|uninstall
+  parabox-arena assembly-daemon [--poll-seconds 10]
+  parabox-arena service install|install-assembler|status|uninstall
   parabox-arena restore <run/save-recovery.json>
 `);
 }
