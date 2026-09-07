@@ -164,6 +164,8 @@ export async function startVirtualGame(options: {
       STEAM_COMPAT_CLIENT_INSTALL_PATH: steamRoot,
       SteamAppId: options.game.appId,
       SteamGameId: options.game.appId,
+      PROTON_LOG: "1",
+      PROTON_LOG_DIR: options.runtimeDirectory,
     };
     const gameProcess = spawn(
       proton ?? options.game.executable,
@@ -185,6 +187,13 @@ export async function startVirtualGame(options: {
     );
     logChildOutput(gameProcess, path.join(options.runtimeDirectory, "game.log"));
     childProcesses.push(gameProcess);
+    await delay(1_500);
+    if (gameProcess.exitCode !== null) {
+      throw new Error(
+        `Game process exited before creating a window (code=${gameProcess.exitCode}); ` +
+          `see ${path.join(options.runtimeDirectory, `steam-${options.game.appId}.log`)}`,
+      );
+    }
 
     return {
       display,
