@@ -630,13 +630,14 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       compositorScreenshot: virtualGame.compositorScreenshot,
     });
     game = activeGame;
+    const gameStartupTimeoutMs = isParabox ? 120_000 : 5 * 60_000;
     gameWindow = await waitForGame(
       activeGame,
-      120_000,
+      gameStartupTimeoutMs,
       () => requestedStop !== null,
     );
     await activeGame.waitForVisibleFrame(
-      120_000,
+      gameStartupTimeoutMs,
       () => requestedStop !== null,
     );
     await audit.append("game.ready", {

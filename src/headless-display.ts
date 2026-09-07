@@ -47,7 +47,11 @@ export async function startVirtualGame(options: {
     process.env.ASTRA_CAGE,
     path.join(options.rootDirectory, ".arena/tools/cage-root/usr/bin/cage"),
   );
-  const proton = options.game.platform === "windows" ? await resolveProton() : null;
+  // Patrick's Parabox is known to tolerate a direct Proton launch.  Most other
+  // Steam games (including Civilization VI) require the real Steam client to
+  // launch them so steamclient/DRM is connected inside the same private display.
+  const directProtonLaunch = options.game.platform === "windows" && options.game.appId === "1260520";
+  const proton = directProtonLaunch ? await resolveProton() : null;
   const keypressCommand = await ensureKeypressHelper(options.rootDirectory);
   const anchorCommand = await ensureX11Anchor(options.rootDirectory);
   const environmentFile = path.join(options.runtimeDirectory, "headless-environment.json");
@@ -125,30 +129,48 @@ export async function startVirtualGame(options: {
         "Steam is already running. Close it before a headless challenge so it cannot forward the game to the physical desktop.",
       );
     }
-    const steamDisplay = await freeXDisplay(170, 199);
-    const steamXvfbProcess = spawn(
-      xvfb,
-      [steamDisplay, "-screen", "0", "1024x768x24", "-br", "-nolisten", "tcp", "-noreset"],
-      { detached: true, stdio: ["ignore", "pipe", "pipe"] },
-    );
-    logChildOutput(
-      steamXvfbProcess,
-      path.join(options.runtimeDirectory, "steam-xvfb.log"),
-    );
-    childProcesses.push(steamXvfbProcess);
-    await waitForXDisplay(steamDisplay, steamXvfbProcess, 15_000);
+    let steamXvfbProcess: ChildProcess | null = null;
     const steamEnvironment: NodeJS.ProcessEnv = {
       ...childEnvironment,
-      DISPLAY: steamDisplay,
+      SteamAppId: options.game.appId,
+      SteamGameId: options.game.appId,
+      PROTON_LOG: "1",
+      PROTON_LOG_DIR: options.runtimeDirectory,
     };
+    if (directProtonLaunch) {
+      const steamDisplay = await freeXDisplay(170, 199);
+      steamXvfbProcess = spawn(
+        xvfb,
+        [steamDisplay, "-screen", "0", "1024x768x24", "-br", "-nolisten", "tcp", "-noreset"],
+        { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      logChildOutput(
+        steamXvfbProcess,
+        path.join(options.runtimeDirectory, "steam-xvfb.log"),
+      );
+      childProcesses.push(steamXvfbProcess);
+      await waitForXDisplay(steamDisplay, steamXvfbProcess, 15_000);
+      steamEnvironment.DISPLAY = steamDisplay;
+    }
+    // Force Steam and its game child onto Cage's nested Xwayland display.  In
+    // particular, do not let a native Wayland Steam client discover niri.
     delete steamEnvironment.WAYLAND_DISPLAY;
-    const steamProcess = spawn("steam", [
+    const steamArguments = [
       "-inhibitbootstrap",
       "-skipinitialbootstrap",
       "-nobootstrapperupdate",
       "-noverifyfiles",
       "-silent",
-    ], {
+    ];
+    if (!directProtonLaunch) {
+      steamArguments.push(
+        "-applaunch", options.game.appId,
+        "-screen-fullscreen", "0",
+        "-screen-width", String(GAME_WIDTH),
+        "-screen-height", String(VIDEO_HEIGHT),
+      );
+    }
+    const steamProcess = spawn("steam", steamArguments, {
       env: steamEnvironment,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -167,32 +189,33 @@ export async function startVirtualGame(options: {
       PROTON_LOG: "1",
       PROTON_LOG_DIR: options.runtimeDirectory,
     };
-    const gameProcess = spawn(
-      proton ?? options.game.executable,
-      proton
-        ? [
-            "run",
-            options.game.executable,
-            "-screen-fullscreen", "0",
-            "-screen-width", String(GAME_WIDTH),
-            "-screen-height", String(VIDEO_HEIGHT),
-          ]
-        : [],
-      {
-        env: gameEnvironment,
-        cwd: options.game.installDirectory,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    logChildOutput(gameProcess, path.join(options.runtimeDirectory, "game.log"));
-    childProcesses.push(gameProcess);
-    await delay(1_500);
-    if (gameProcess.exitCode !== null) {
-      throw new Error(
-        `Game process exited before creating a window (code=${gameProcess.exitCode}); ` +
-          `see ${path.join(options.runtimeDirectory, `steam-${options.game.appId}.log`)}`,
+    let gameProcess: ChildProcess | null = null;
+    if (directProtonLaunch) {
+      gameProcess = spawn(
+        proton!,
+        [
+          "run",
+          options.game.executable,
+          "-screen-fullscreen", "0",
+          "-screen-width", String(GAME_WIDTH),
+          "-screen-height", String(VIDEO_HEIGHT),
+        ],
+        {
+          env: gameEnvironment,
+          cwd: options.game.installDirectory,
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
       );
+      logChildOutput(gameProcess, path.join(options.runtimeDirectory, "game.log"));
+      childProcesses.push(gameProcess);
+      await delay(1_500);
+      if (gameProcess.exitCode !== null) {
+        throw new Error(
+          `Game process exited before creating a window (code=${gameProcess.exitCode}); ` +
+            `see ${path.join(options.runtimeDirectory, `steam-${options.game.appId}.log`)}`,
+        );
+      }
     }
 
     return {
@@ -208,9 +231,9 @@ export async function startVirtualGame(options: {
         environment: captureEnvironment,
       },
       close: async () => {
-        stopProcessGroup(gameProcess, "SIGTERM");
+        if (gameProcess) stopProcessGroup(gameProcess, "SIGTERM");
         await delay(500);
-        if (proton) {
+        if (proton && gameProcess) {
           await runCommand(proton, ["runinprefix", "wineserver", "-k"], {
             env: gameEnvironment,
             timeoutMs: 5_000,
