@@ -69,6 +69,18 @@ test("omits only the recording that may still be open", () => {
   });
 });
 
+test("keeps every sealed composite in the paired-recorder format", () => {
+  const value = checkpoint("running");
+  value.recordingPairs = [];
+  assert.deepEqual(sealedRecordingNames(value), {
+    names: [
+      "recordings/challenge-part-0001.mkv",
+      "recordings/challenge-part-0002.mkv",
+    ],
+    omittedOpenRecording: null,
+  });
+});
+
 test("cuts resumed parts at their active snapshot boundary", () => {
   const snapshot = (elapsedMs: number) => ({ time: { elapsedMs } });
   const events = [

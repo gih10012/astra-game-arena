@@ -2,10 +2,9 @@ import { lstat, readFile, readdir, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { durableJsonWrite } from "./run-checkpoint.js";
+import type { AccountPolicy } from "./run-checkpoint.js";
 
 export const ACCOUNT_POOL_FILENAME = "account-pool.json";
-export const RESERVE_USED_PERCENT = 50;
-
 export interface CodexAccountProfile {
   id: string;
   email: string;
@@ -18,6 +17,8 @@ export interface RateWindowState {
 }
 
 export interface AccountUsageState extends CodexAccountProfile {
+  reserveFiveHourPercent: number;
+  reserveWeeklyPercent: number;
   primary: RateWindowState;
   secondary: RateWindowState;
   blockedUntilMs: number | null;
@@ -27,7 +28,6 @@ export interface AccountUsageState extends CodexAccountProfile {
 
 export interface AccountPoolState {
   version: 1;
-  reserveUsedPercent: number;
   activeAccountId: string | null;
   accounts: AccountUsageState[];
 }
@@ -114,6 +114,7 @@ export class AccountPool {
   static async open(
     runDirectory: string,
     profiles: CodexAccountProfile[],
+    policies: AccountPolicy[] = [],
   ): Promise<AccountPool> {
     const filename = path.join(runDirectory, ACCOUNT_POOL_FILENAME);
     let persisted: AccountPoolState | null = null;
@@ -128,17 +129,29 @@ export class AccountPool {
         account,
       ]),
     );
-    const accounts = profiles.map((profile) => ({
-      ...profile,
-      primary: prior.get(profile.id)?.primary ?? unknownWindow(),
-      secondary: prior.get(profile.id)?.secondary ?? unknownWindow(),
-      blockedUntilMs: prior.get(profile.id)?.blockedUntilMs ?? null,
-      lastPrimaryResetAtMs: prior.get(profile.id)?.lastPrimaryResetAtMs ?? null,
-      updatedAt: prior.get(profile.id)?.updatedAt ?? null,
-    }));
+    const configured = new Map(policies.map((policy) => [policy.accountId, policy]));
+    const accounts = profiles
+      .filter((profile) => configured.get(profile.id)?.enabled !== false)
+      .map((profile) => {
+        const old = prior.get(profile.id);
+        const policy = configured.get(profile.id);
+        return {
+          ...profile,
+          reserveFiveHourPercent: boundedPercent(
+            policy?.reserveFiveHourPercent ?? old?.reserveFiveHourPercent ?? 0,
+          ),
+          reserveWeeklyPercent: boundedPercent(
+            policy?.reserveWeeklyPercent ?? old?.reserveWeeklyPercent ?? 0,
+          ),
+          primary: old?.primary ?? unknownWindow(),
+          secondary: old?.secondary ?? unknownWindow(),
+          blockedUntilMs: old?.blockedUntilMs ?? null,
+          lastPrimaryResetAtMs: old?.lastPrimaryResetAtMs ?? null,
+          updatedAt: old?.updatedAt ?? null,
+        };
+      });
     const pool = new AccountPool(filename, {
       version: 1,
-      reserveUsedPercent: RESERVE_USED_PERCENT,
       activeAccountId: persisted?.activeAccountId ?? null,
       accounts,
     });
@@ -155,17 +168,7 @@ export class AccountPool {
     this.#normalize(nowMs);
     const accounts = this.#state.accounts;
     const available = accounts.filter((account) => isAvailable(account, nowMs));
-    const candidates = available.filter((candidate) => {
-      const anotherAccountIsReserved = accounts.some(
-        (other) =>
-          other.id !== candidate.id &&
-          other.primary.usedPercent !== null &&
-          other.primary.usedPercent <= this.#state.reserveUsedPercent,
-      );
-      return anotherAccountIsReserved ||
-        candidate.primary.usedPercent === null ||
-        candidate.primary.usedPercent < this.#state.reserveUsedPercent;
-    });
+    const candidates = available.filter((candidate) => !reachedReserve(candidate));
     const account = [...candidates].sort((left, right) =>
       compareAccounts(left, right, this.#state.activeAccountId),
     )[0] ?? null;
@@ -173,18 +176,13 @@ export class AccountPool {
       this.#state.activeAccountId = account.id;
       return {
         account: structuredClone(account),
-        limitedByReserve: !accounts.some(
-          (other) =>
-            other.id !== account.id &&
-            other.primary.usedPercent !== null &&
-            other.primary.usedPercent <= this.#state.reserveUsedPercent,
-        ),
+        limitedByReserve: available.some((candidate) => reachedReserve(candidate)),
         retryAtMs: null,
       };
     }
     return {
       account: null,
-      limitedByReserve: false,
+      limitedByReserve: available.some((candidate) => reachedReserve(candidate)),
       retryAtMs: nextEligibility(accounts, nowMs),
     };
   }
@@ -217,19 +215,7 @@ export class AccountPool {
   shouldStopForReserve(accountId: string, nowMs = Date.now()): boolean {
     this.#normalize(nowMs);
     const active = this.#state.accounts.find((entry) => entry.id === accountId);
-    if (
-      !active ||
-      active.primary.usedPercent === null ||
-      active.primary.usedPercent < this.#state.reserveUsedPercent
-    ) {
-      return false;
-    }
-    return !this.#state.accounts.some(
-      (other) =>
-        other.id !== accountId &&
-        other.primary.usedPercent !== null &&
-        other.primary.usedPercent <= this.#state.reserveUsedPercent,
-    );
+    return active ? reachedReserve(active) : false;
   }
 
   hasImmediateAlternative(accountId: string, nowMs = Date.now()): boolean {
@@ -286,6 +272,20 @@ function isAvailable(account: AccountUsageState, nowMs: number): boolean {
   return account.secondary.usedPercent === null || account.secondary.usedPercent < 100;
 }
 
+function reachedReserve(account: AccountUsageState): boolean {
+  const primaryLimit = 100 - account.reserveFiveHourPercent;
+  const secondaryLimit = 100 - account.reserveWeeklyPercent;
+  return (
+    account.primary.usedPercent !== null && account.primary.usedPercent >= primaryLimit
+  ) || (
+    account.secondary.usedPercent !== null && account.secondary.usedPercent >= secondaryLimit
+  );
+}
+
+function boundedPercent(value: number): number {
+  return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+}
+
 function compareAccounts(
   left: AccountUsageState,
   right: AccountUsageState,
@@ -302,12 +302,27 @@ function compareAccounts(
 }
 
 function nextEligibility(accounts: AccountUsageState[], nowMs: number): number | null {
-  const deadlines = accounts.flatMap((account) => [
-    account.blockedUntilMs,
-    account.primary.resetsAtMs,
-    account.secondary.resetsAtMs,
-  ]).filter((deadline): deadline is number => deadline !== null && deadline > nowMs);
-  return deadlines.length > 0 ? Math.min(...deadlines) : null;
+  const accountDeadlines = accounts.flatMap((account) => {
+    const blockers: Array<number | null> = [];
+    if (account.blockedUntilMs !== null && account.blockedUntilMs > nowMs) {
+      blockers.push(account.blockedUntilMs);
+    }
+    if (
+      account.primary.usedPercent !== null &&
+      account.primary.usedPercent >= 100 - account.reserveFiveHourPercent
+    ) {
+      blockers.push(account.primary.resetsAtMs);
+    }
+    if (
+      account.secondary.usedPercent !== null &&
+      account.secondary.usedPercent >= 100 - account.reserveWeeklyPercent
+    ) {
+      blockers.push(account.secondary.resetsAtMs);
+    }
+    if (blockers.length === 0 || blockers.some((deadline) => deadline === null)) return [];
+    return [Math.max(...blockers as number[])];
+  });
+  return accountDeadlines.length > 0 ? Math.min(...accountDeadlines) : null;
 }
 
 function jwtEmail(token: string | undefined): string | null {

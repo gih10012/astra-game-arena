@@ -1,11 +1,12 @@
 {
-  "name": "astra-parabox-benchmark",
-  "version": "0.1.0",
-  "description": "A reproducible, screen-only Patrick's Parabox benchmark harness for GPT-6-Astra.",
+  "name": "astra-game-arena",
+  "version": "0.2.0",
+  "description": "A resumable, private-desktop Steam game benchmark arena for Codex models.",
   "type": "module",
   "private": false,
   "license": "MIT",
   "bin": {
+    "game-arena": "dist/src/cli.js",
     "parabox-arena": "dist/src/cli.js"
   },
   "scripts": {

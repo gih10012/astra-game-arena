@@ -33,14 +33,14 @@ test("disables search and browsers while retaining normal Codex capabilities", (
   assert.equal(args[args.indexOf("--sandbox") + 1], "workspace-write");
   assert.equal(args.at(-1), NEUTRAL_PROMPT);
   const allowlist = args.find((argument) =>
-    argument.startsWith("mcp_servers.parabox.enabled_tools="),
+    argument.startsWith("mcp_servers.game.enabled_tools="),
   );
   assert.equal(
     allowlist,
-    'mcp_servers.parabox.enabled_tools=["observe_game","press_keys","challenge_time","challenge_tokens"]',
+    'mcp_servers.game.enabled_tools=["observe_screen","press_keys","type_text","mouse","challenge_time","challenge_tokens","complete_challenge"]',
   );
   assert.ok(
-    args.includes('mcp_servers.parabox.default_tools_approval_mode="approve"'),
+    args.includes('mcp_servers.game.default_tools_approval_mode="approve"'),
   );
   assert.equal(args.some((argument) => argument.includes("view_image")), false);
 });

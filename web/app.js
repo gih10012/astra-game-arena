@@ -1,14 +1,15 @@
 const byId = (id) => document.getElementById(id);
+const compact = new URLSearchParams(location.search).get("compact") === "1";
 const state = {
   snapshot: null,
+  supervisor: null,
+  options: null,
   localReceivedAt: 0,
   transcriptSequences: new Set(),
   itemRows: new Map(),
 };
 
-if (new URLSearchParams(location.search).get("compact") === "1") {
-  document.body.classList.add("compact");
-}
+if (compact) document.body.classList.add("compact");
 
 function formatNumber(value) {
   return new Intl.NumberFormat("en-US").format(Number(value || 0));
@@ -20,36 +21,32 @@ function formatElapsed(milliseconds) {
   const minutes = Math.floor((value % 3_600_000) / 60_000);
   const seconds = Math.floor((value % 60_000) / 1_000);
   const millis = value % 1_000;
-  return [hours, minutes, seconds]
-    .map((part) => String(part).padStart(2, "0"))
-    .join(":") + `.${String(millis).padStart(3, "0")}`;
+  return [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":") +
+    `.${String(millis).padStart(3, "0")}`;
 }
 
 function applySnapshot(snapshot) {
   state.snapshot = snapshot;
   state.localReceivedAt = performance.now();
-  byId("tokens").textContent = formatNumber(snapshot.tokens.totalTokens);
+  byId("tokens").textContent = formatNumber(snapshot.tokens?.totalTokens);
   byId("token-breakdown").textContent =
-    `${formatNumber(snapshot.tokens.inputTokens)} in · ` +
-    `${formatNumber(snapshot.tokens.outputTokens)} out`;
-  byId("complete").textContent = formatNumber(snapshot.progress.completed);
-  byId("progress-bar").style.width =
-    `${Math.min(100, (snapshot.progress.completed / snapshot.targetLevels) * 100)}%`;
-  byId("model").textContent = snapshot.model.toUpperCase();
-  byId("status").textContent = snapshot.status.toUpperCase();
+    `${formatNumber(snapshot.tokens?.inputTokens)} in · ${formatNumber(snapshot.tokens?.outputTokens)} out`;
+  byId("model").textContent = String(snapshot.model || "—").toUpperCase();
+  const phase = snapshot.phase || snapshot.status || "idle";
+  byId("status").textContent = String(phase).replaceAll("_", " ").toUpperCase();
+  byId("game-name").textContent = snapshot.game?.name || "NO RUN";
+  byId("goal-summary").textContent = snapshot.goal || "configure a challenge";
   byId("run-id").textContent = snapshot.runId
     ? `${snapshot.runId} · PART ${String(snapshot.attempt || 1).padStart(4, "0")}`
     : "not started";
+  updateControls();
 }
 
 function tick() {
   if (state.snapshot) {
-    const runningDelta = state.snapshot.status === "running"
-      ? performance.now() - state.localReceivedAt
-      : 0;
-    byId("elapsed").textContent = formatElapsed(
-      state.snapshot.time.elapsedMs + runningDelta,
-    );
+    const phase = state.snapshot.phase || state.snapshot.status;
+    const runningDelta = phase === "running" ? performance.now() - state.localReceivedAt : 0;
+    byId("elapsed").textContent = formatElapsed((state.snapshot.time?.elapsedMs || 0) + runningDelta);
   }
   requestAnimationFrame(tick);
 }
@@ -80,16 +77,10 @@ function addCode(container, label, value, className = "") {
   const code = document.createElement("pre");
   const text = stringify(value);
   const lines = text.split("\n");
-  if (lines.length > 14) {
-    code.textContent = [
-      ...lines.slice(0, 8),
-      `… +${lines.length - 12} lines`,
-      ...lines.slice(-4),
-    ].join("\n");
-    code.title = text;
-  } else {
-    code.textContent = text;
-  }
+  code.textContent = lines.length > 18
+    ? [...lines.slice(0, 11), `… +${lines.length - 15} lines`, ...lines.slice(-4)].join("\n")
+    : text;
+  if (lines.length > 18) code.title = text;
   block.append(code);
   container.append(block);
 }
@@ -98,42 +89,29 @@ function parseToolResultText(result) {
   const content = Array.isArray(result?.content) ? result.content : [];
   const text = content.find((entry) => entry?.type === "text")?.text;
   if (typeof text !== "string") return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
+  try { return JSON.parse(text); } catch { return text; }
 }
 
 function conciseToolDetails(item) {
   const parsed = parseToolResultText(item.result);
-  if (item.tool === "observe_game") {
-    return [
-      ["FRAME", parsed && typeof parsed === "object"
-        ? `${parsed.capturedAt || "captured"} · sha256 ${String(parsed.sha256 || "").slice(0, 16)}…`
-        : "Game frame captured"],
-      ["ERROR", item.error, "error-text"],
-    ];
+  if (item.tool === "observe_screen") {
+    return [["FRAME", parsed ? `${parsed.capturedAt || "captured"} · sha256 ${String(parsed.sha256 || "").slice(0, 16)}…` : "Captured"]];
   }
   if (item.tool === "press_keys") {
     const keys = Array.isArray(item.arguments?.keys) ? item.arguments.keys : [];
-    const shown = keys.slice(0, 24).join(" ");
-    const suffix = keys.length > 24 ? ` … +${keys.length - 24}` : "";
-    const timing = [
-      item.arguments?.intervalMs === undefined ? null : `interval ${item.arguments.intervalMs}ms`,
-      item.arguments?.settleMs === undefined ? null : `settle ${item.arguments.settleMs}ms`,
-    ].filter(Boolean).join(" · ");
     return [
-      ["KEYS", `${shown}${suffix}${timing ? `\n${timing}` : ""}`],
+      ["KEYS", `${keys.slice(0, 30).join(" ")}${keys.length > 30 ? ` … +${keys.length - 30}` : ""}`],
       ["RESULT", parsed ?? item.result, "output"],
       ["ERROR", item.error, "error-text"],
     ];
   }
-  return [
-    ["ARGS", item.arguments],
-    ["RESULT", parsed ?? item.result, "output"],
-    ["ERROR", item.error, "error-text"],
-  ];
+  if (item.tool === "mouse") {
+    return [["ACTION", item.arguments], ["RESULT", parsed ?? item.result, "output"], ["ERROR", item.error, "error-text"]];
+  }
+  if (item.tool === "type_text") {
+    return [["TEXT", item.arguments?.text], ["RESULT", parsed ?? item.result, "output"], ["ERROR", item.error, "error-text"]];
+  }
+  return [["ARGS", item.arguments], ["RESULT", parsed ?? item.result, "output"], ["ERROR", item.error, "error-text"]];
 }
 
 function eventPresentation(event) {
@@ -143,108 +121,49 @@ function eventPresentation(event) {
   const status = item?.status || "";
   const complete = eventType === "item.completed" || status === "completed";
   const failed = eventType.includes("error") || itemType === "error" || status === "failed";
-
-  if (itemType === "agent_message") {
-    return { label: "CODEX", kind: "agent", title: item.text || "" };
-  }
-  if (itemType === "reasoning") {
-    return { label: "THINK", kind: "reasoning", title: item.text || "" };
-  }
+  if (itemType === "agent_message") return { label: "CODEX", kind: "agent", title: item.text || "" };
+  if (itemType === "reasoning") return { label: "THINK", kind: "reasoning", title: item.text || "" };
   if (itemType === "command_execution") {
     return {
-      label: "SHELL",
-      kind: failed ? "error" : "tool",
+      label: "SHELL", kind: failed ? "error" : "tool",
       title: `${complete ? "Ran" : "Running"} ${item.command || "command"}`,
-      details: [
-        ["OUTPUT", item.aggregated_output, "output"],
-        ["EXIT", item.exit_code, item.exit_code ? "error-text" : ""],
-      ],
+      details: [["OUTPUT", item.aggregated_output, "output"], ["EXIT", item.exit_code, item.exit_code ? "error-text" : ""]],
     };
   }
   if (itemType === "mcp_tool_call") {
     const name = `${item.server || "mcp"}.${item.tool || item.name || "tool"}`;
-    return {
-      label: "TOOL",
-      kind: failed ? "error" : "tool",
-      title: `${complete ? "Called" : "Calling"} ${name}`,
-      details: conciseToolDetails(item),
-    };
+    return { label: "TOOL", kind: failed ? "error" : "tool", title: `${complete ? "Called" : "Calling"} ${name}`, details: conciseToolDetails(item) };
   }
-  if (itemType === "error") {
-    return { label: "ERROR", kind: "error", title: item.message || stringify(item) };
-  }
+  if (itemType === "error") return { label: "ERROR", kind: "error", title: item.message || stringify(item) };
   if (item) {
-    const remaining = Object.fromEntries(
-      Object.entries(item).filter(([key]) => !["id", "type", "status", "text"].includes(key)),
-    );
+    const remaining = Object.fromEntries(Object.entries(item).filter(([key]) => !["id", "type", "status", "text"].includes(key)));
     return {
-      label: itemType.slice(0, 7).toUpperCase() || "ITEM",
-      kind: failed ? "error" : "system",
+      label: itemType.slice(0, 7).toUpperCase() || "ITEM", kind: failed ? "error" : "system",
       title: item.text || `${eventType} · ${itemType || "item"}`,
       details: Object.keys(remaining).length ? [["DETAIL", remaining]] : [],
     };
   }
-  if (eventType === "thread.started") {
-    return {
-      label: "THREAD",
-      kind: "system",
-      title: "Thread started",
-      details: [["ID", event.thread_id]],
-    };
-  }
-  if (eventType === "turn.started") {
-    return { label: "TURN", kind: "system", title: "Turn started" };
-  }
-  if (eventType === "turn.completed") {
-    return {
-      label: "TURN",
-      kind: "success",
-      title: "Turn completed",
-      details: [["USAGE", event.usage]],
-    };
-  }
-  if (eventType === "stderr") {
-    return { label: "STDERR", kind: "error", title: event.message || "stderr" };
-  }
-  if (eventType === "error" || eventType === "runner.error") {
-    return { label: "ERROR", kind: "error", title: event.message || stringify(event) };
-  }
-  if (eventType === "process.started") {
-    return { label: "PROC", kind: "system", title: `Started ${event.process}` };
-  }
-  if (eventType === "process.exited") {
-    return {
-      label: "PROC",
-      kind: event.code === 0 ? "success" : "error",
-      title: `${event.process} exited (code=${event.code}, signal=${event.signal})`,
-    };
-  }
-  if (eventType === "runner.ready") {
-    return { label: "SYS", kind: "success", title: event.message };
-  }
-  const remaining = Object.fromEntries(
-    Object.entries(event).filter(([key]) => key !== "type"),
-  );
-  return {
-    label: eventType.slice(0, 7).toUpperCase(),
-    kind: failed ? "error" : "system",
-    title: event.message || eventType,
-    details: Object.keys(remaining).length ? [["DETAIL", remaining]] : [],
-  };
+  if (eventType === "thread.started") return { label: "THREAD", kind: "system", title: "Thread started", details: [["ID", event.thread_id]] };
+  if (eventType === "turn.started") return { label: "TURN", kind: "system", title: "Turn started" };
+  if (eventType === "turn.completed") return { label: "TURN", kind: "success", title: "Turn completed", details: [["USAGE", event.usage]] };
+  if (eventType === "stderr") return { label: "STDERR", kind: "error", title: event.message || "stderr" };
+  if (eventType === "error" || eventType === "runner.error") return { label: "ERROR", kind: "error", title: event.message || stringify(event) };
+  if (eventType === "process.started") return { label: "PROC", kind: "system", title: `Started ${event.process}` };
+  if (eventType === "process.exited") return { label: "PROC", kind: event.code === 0 ? "success" : "error", title: `${event.process} exited (code=${event.code}, signal=${event.signal})` };
+  if (eventType === "runner.ready") return { label: "SYS", kind: "success", title: event.message };
+  if (eventType === "challenge.completed") return { label: "DONE", kind: "success", title: event.message };
+  const remaining = Object.fromEntries(Object.entries(event).filter(([key]) => key !== "type"));
+  return { label: eventType.slice(0, 7).toUpperCase(), kind: failed ? "error" : "system", title: event.message || eventType, details: Object.keys(remaining).length ? [["DETAIL", remaining]] : [] };
 }
 
 function renderTranscriptRow(row, event) {
   const presentation = eventPresentation(event);
   row.className = `event ${presentation.kind}`;
   row.replaceChildren();
-  const label = document.createElement("time");
-  label.textContent = presentation.label;
-  const body = document.createElement("div");
-  body.className = "event-body";
+  const label = document.createElement("time"); label.textContent = presentation.label;
+  const body = document.createElement("div"); body.className = "event-body";
   addText(body, presentation.title, "event-title");
-  for (const [detailLabel, value, className] of presentation.details || []) {
-    addCode(body, detailLabel, value, className);
-  }
+  for (const [detailLabel, value, className] of presentation.details || []) addCode(body, detailLabel, value, className);
   row.append(label, body);
 }
 
@@ -256,7 +175,6 @@ function addTranscript(record) {
     state.transcriptSequences.add(sequence);
   }
   byId("transcript").querySelector("[data-placeholder]")?.remove();
-
   const itemId = event?.item?.id;
   let row = itemId ? state.itemRows.get(itemId) : null;
   if (!row) {
@@ -265,40 +183,178 @@ function addTranscript(record) {
     if (itemId) state.itemRows.set(itemId, row);
   }
   renderTranscriptRow(row, event || { type: "unknown" });
-  row.scrollIntoView({ block: "end" });
+  byId("transcript").scrollTop = byId("transcript").scrollHeight;
+}
+
+function replaceTranscript(records) {
+  state.transcriptSequences.clear(); state.itemRows.clear(); byId("transcript").replaceChildren();
+  if (!records.length) addTranscript({ type: "runner.ready", message: "Waiting for the challenge runner." });
+  else records.forEach(addTranscript);
+}
+
+function showFrame(version = Date.now()) {
+  const image = byId("game-frame");
+  image.src = `/api/frame?v=${encodeURIComponent(version)}`;
+  image.style.display = "block";
+  byId("frame-placeholder").style.display = "none";
+  byId("frame-time").textContent = new Date().toISOString();
+}
+
+async function loadOptions() {
+  state.options = await fetch("/api/options").then(assertJson);
+  const gameSelect = byId("game-select");
+  gameSelect.replaceChildren(...state.options.games.map((game) => new Option(`${game.name} · ${game.appId}`, game.appId)));
+  gameSelect.value = state.options.defaults.gameAppId;
+  const modelSelect = byId("model-select");
+  modelSelect.replaceChildren(...state.options.models.map((model) => new Option(model.displayName, model.slug)));
+  modelSelect.value = state.options.defaults.model;
+  byId("goal-input").value = state.options.defaults.goal;
+  byId("record-toggle").checked = state.options.defaults.record;
+  renderReasoningOptions(); renderAccounts(); updateGameDetail();
+}
+
+function renderReasoningOptions() {
+  const model = state.options?.models.find((entry) => entry.slug === byId("model-select").value);
+  const efforts = model?.reasoningEfforts?.length ? model.reasoningEfforts : state.options?.reasoningEfforts || ["high"];
+  const select = byId("reasoning-select");
+  const current = select.value || state.options?.defaults.reasoningEffort;
+  select.replaceChildren(...efforts.map((effort) => new Option(effort.toUpperCase(), effort)));
+  select.value = efforts.includes(current) ? current : model?.defaultReasoningEffort || efforts[0];
+}
+
+function renderAccounts() {
+  const container = byId("account-pool"); container.replaceChildren();
+  for (const account of state.options.accounts) {
+    const row = document.createElement("div"); row.className = "account-row"; row.dataset.accountId = account.id;
+    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = true; enabled.className = "account-enabled";
+    const identity = document.createElement("div"); identity.className = "account-name";
+    const email = document.createElement("b"); email.textContent = account.email;
+    const label = document.createElement("small"); label.textContent = account.label;
+    identity.append(email, label);
+    row.append(enabled, identity, quotaInput("保留 5h", "reserveFiveHour", 0), quotaInput("保留 weekly", "reserveWeekly", 0));
+    container.append(row);
+  }
+  if (!state.options.accounts.length) {
+    const empty = document.createElement("p"); empty.textContent = "未发现独立 Codex 账号目录；将使用默认官方凭据。"; container.append(empty);
+  }
+}
+
+function quotaInput(label, className, value) {
+  const wrapper = document.createElement("label"); wrapper.className = "quota-field";
+  const text = document.createElement("span"); text.textContent = `${label} %`;
+  const input = document.createElement("input"); input.type = "number"; input.min = "0"; input.max = "100"; input.step = "1"; input.value = String(value); input.className = className;
+  wrapper.append(text, input); return wrapper;
+}
+
+function updateGameDetail() {
+  const game = state.options?.games.find((entry) => entry.appId === byId("game-select").value);
+  byId("game-detail").textContent = game ? `${game.platform} · ${game.installDirectory}` : "未选择";
+}
+
+function accountPolicies() {
+  return [...byId("account-pool").querySelectorAll(".account-row")].map((row) => ({
+    accountId: row.dataset.accountId,
+    enabled: row.querySelector(".account-enabled").checked,
+    reserveFiveHourPercent: Number(row.querySelector(".reserveFiveHour").value),
+    reserveWeeklyPercent: Number(row.querySelector(".reserveWeekly").value),
+  }));
+}
+
+async function submitChallenge(event) {
+  event.preventDefault();
+  byId("start-button").disabled = true; byId("form-message").textContent = "正在排队…";
+  try {
+    await postControl("start", {
+      gameAppId: byId("game-select").value,
+      model: byId("model-select").value,
+      reasoningEffort: byId("reasoning-select").value,
+      goal: byId("goal-input").value,
+      record: byId("record-toggle").checked,
+      accountPolicies: accountPolicies(),
+    });
+    byId("configuration").hidden = true; byId("form-message").textContent = "";
+    await refreshSupervisor();
+  } catch (error) {
+    byId("form-message").textContent = error.message;
+  } finally { byId("start-button").disabled = false; }
+}
+
+async function postControl(action, body = {}) {
+  return await fetch(`/api/control/${action}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  }).then(assertJson);
+}
+
+async function refreshSupervisor() {
+  if (compact) return;
+  try {
+    state.supervisor = await fetch("/api/supervisor", { cache: "no-store" }).then(assertJson);
+    const pool = state.supervisor.accountPool;
+    const active = pool?.accounts?.find((account) => account.id === pool.activeAccountId);
+    byId("active-account").textContent = active?.email || "—";
+    byId("five-hour").textContent = quotaText(active?.primary, active?.reserveFiveHourPercent);
+    byId("weekly").textContent = quotaText(active?.secondary, active?.reserveWeeklyPercent);
+    const checkpoint = state.supervisor.checkpoint;
+    byId("next-action").textContent = checkpoint?.retryAt ? `resume ${new Date(checkpoint.retryAt).toLocaleString()}` : checkpoint?.reason || "ready";
+    byId("video-parts").textContent = String(state.supervisor.recording?.parts || 0);
+    byId("recording-state").textContent = state.supervisor.recording?.active ? "REC LIVE" : state.supervisor.recording?.enabled ? "REC PAUSED" : "REC OFF";
+    updateControls();
+  } catch {
+    byId("daemon-state").textContent = "RECONNECTING";
+  }
+}
+
+function quotaText(window, reserve) {
+  if (!window || window.usedPercent === null) return reserve ? `unknown · reserve ${reserve}%` : "unknown";
+  return `${Math.round(window.usedPercent)}% used · reserve ${reserve || 0}%`;
+}
+
+function updateControls() {
+  if (compact) return;
+  const phase = state.supervisor?.checkpoint?.phase || state.snapshot?.phase || "idle";
+  const active = state.supervisor?.active && !["completed", "failed"].includes(phase);
+  byId("pause-button").disabled = !active || phase === "paused";
+  byId("resume-button").disabled = phase !== "paused";
+  byId("end-button").disabled = !active;
+}
+
+async function assertJson(response) {
+  const value = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(value.error || `HTTP ${response.status}`);
+  return value;
 }
 
 async function bootstrap() {
   const [snapshot, transcript] = await Promise.all([
-    fetch("/api/challenge").then((response) => response.json()),
-    fetch("/api/transcript").then((response) => response.json()),
+    fetch("/api/challenge").then(assertJson),
+    fetch("/api/transcript").then(assertJson),
   ]);
-  applySnapshot(snapshot);
-  transcript.forEach(addTranscript);
+  applySnapshot(snapshot); replaceTranscript(transcript);
   const frameResponse = await fetch("/api/frame");
-  if (frameResponse.ok && frameResponse.status !== 204) {
-    const image = byId("game-frame");
-    image.src = "/api/frame?v=initial";
-    image.style.display = "block";
-    byId("frame-placeholder").style.display = "none";
-    byId("frame-time").textContent = "latest frame";
+  if (frameResponse.ok && frameResponse.status !== 204) showFrame("initial");
+  if (!compact) {
+    await loadOptions(); await refreshSupervisor();
+    if (!state.supervisor?.active) byId("configuration").hidden = false;
+    setInterval(refreshSupervisor, 2_000);
   }
 }
 
 const events = new EventSource("/api/events");
 events.addEventListener("state", (event) => applySnapshot(JSON.parse(event.data)));
 events.addEventListener("transcript", (event) => addTranscript(JSON.parse(event.data)));
-events.addEventListener("frame", (event) => {
-  const detail = JSON.parse(event.data);
-  const image = byId("game-frame");
-  image.src = `/api/frame?v=${encodeURIComponent(detail.sha256)}`;
-  image.style.display = "block";
-  byId("frame-placeholder").style.display = "none";
-  byId("frame-time").textContent = detail.capturedAt;
-});
+events.addEventListener("transcript_reset", (event) => replaceTranscript(JSON.parse(event.data)));
+events.addEventListener("frame", (event) => showFrame(JSON.parse(event.data).sha256));
 
-bootstrap().catch((error) => addTranscript({
-  type: "error",
-  message: error.message,
-}));
+if (!compact) {
+  byId("configure-button").addEventListener("click", () => { byId("configuration").hidden = false; });
+  byId("configuration-close").addEventListener("click", () => { byId("configuration").hidden = true; });
+  byId("game-select").addEventListener("change", updateGameDetail);
+  byId("model-select").addEventListener("change", renderReasoningOptions);
+  byId("challenge-form").addEventListener("submit", submitChallenge);
+  byId("pause-button").addEventListener("click", () => postControl("pause").then(refreshSupervisor));
+  byId("resume-button").addEventListener("click", () => postControl("resume").then(refreshSupervisor));
+  byId("end-button").addEventListener("click", () => postControl("end").then(refreshSupervisor));
+}
+
+bootstrap().catch((error) => addTranscript({ type: "error", message: error.message }));
 tick();

@@ -43,6 +43,7 @@ export function sealedRecordingNames(checkpoint: RunCheckpoint): {
   const names = [...checkpoint.recordings];
   const last = names.at(-1) ?? null;
   const lastMayStillBeOpen =
+    checkpoint.recordingPairs === undefined &&
     last !== null &&
     (checkpoint.phase === "starting" || checkpoint.phase === "running");
   return {

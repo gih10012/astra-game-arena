@@ -1,20 +1,25 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync } from "node:fs";
-import { access, mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./command.js";
+import type { InstalledSteamGame } from "./steam-catalog.js";
 
 const GAME_WIDTH = 1280;
 const VIDEO_HEIGHT = 1080;
 const DASHBOARD_WIDTH = 640;
-const CHROME_APP_INSET = 8;
 
 export interface VirtualGameRuntime {
   display: string;
-  gamescopeDisplay: string;
   keypressCommand: string;
   compositorScreenshot: {
     command: string;
+    arguments: string[];
+    environment: NodeJS.ProcessEnv;
+  };
+  captureWayland: {
+    output: string;
     environment: NodeJS.ProcessEnv;
   };
   close(): Promise<void>;
@@ -25,70 +30,53 @@ export interface VirtualDashboardRuntime {
   close(): Promise<void>;
 }
 
-export type VirtualGameMirrorRuntime = VirtualDashboardRuntime;
-
 export async function startVirtualGame(options: {
   rootDirectory: string;
   runtimeDirectory: string;
-  executable: string;
+  game: InstalledSteamGame;
 }): Promise<VirtualGameRuntime> {
-  const gamescope = await resolveTool(
-    "gamescope",
-    process.env.ASTRA_GAMESCOPE,
-    path.join(options.rootDirectory, ".arena/tools/gamescope-root/usr/bin/gamescope"),
-  );
-  const gamescopeCtl = path.join(path.dirname(gamescope), "gamescopectl");
-  await access(gamescopeCtl);
+  await mkdir(options.runtimeDirectory, { recursive: true });
   const xvfb = await resolveTool(
     "Xvfb",
     process.env.ASTRA_XVFB,
     path.join(options.rootDirectory, ".arena/tools/xvfb-root/usr/bin/Xvfb"),
   );
-  const proton = await resolveProton();
+  const cage = await resolveTool(
+    "cage",
+    process.env.ASTRA_CAGE,
+    path.join(options.rootDirectory, ".arena/tools/cage-root/usr/bin/cage"),
+  );
+  const proton = options.game.platform === "windows" ? await resolveProton() : null;
   const keypressCommand = await ensureKeypressHelper(options.rootDirectory);
+  const anchorCommand = await ensureX11Anchor(options.rootDirectory);
   const environmentFile = path.join(options.runtimeDirectory, "headless-environment.json");
-  const gamescopeLog = path.join(options.runtimeDirectory, "gamescope.log");
-  const hostEntry = path.join(options.rootDirectory, "dist/src/headless-host.js");
-  await access(hostEntry);
+  const compositorLog = path.join(options.runtimeDirectory, "compositor.log");
+  const cageHostEntry = path.join(options.rootDirectory, "dist/src/cage-host.js");
+  await access(cageHostEntry);
 
   const runtimeEnvironment = withoutPhysicalDisplay(process.env);
-  runtimeEnvironment.PATH = `${path.dirname(gamescope)}:${runtimeEnvironment.PATH ?? ""}`;
-  const privateLibrary = path.resolve(
-    options.rootDirectory,
-    ".arena/tools/gamescope-root/usr/lib",
-  );
-  if (existsSync(privateLibrary)) {
+  const runtimeBase = process.env.XDG_RUNTIME_DIR || os.tmpdir();
+  const waylandRuntimeDirectory = await mkdtemp(path.join(runtimeBase, "astra-game-"));
+  await chmod(waylandRuntimeDirectory, 0o700);
+  runtimeEnvironment.XDG_RUNTIME_DIR = waylandRuntimeDirectory;
+  runtimeEnvironment.WLR_BACKENDS = "headless";
+  runtimeEnvironment.WLR_HEADLESS_OUTPUTS = "1";
+  runtimeEnvironment.WLR_LIBINPUT_NO_DEVICES = "1";
+  runtimeEnvironment.WLR_RENDERER = "gles2";
+  const cageLibrary = path.resolve(path.dirname(cage), "../lib");
+  if (existsSync(cageLibrary)) {
     runtimeEnvironment.LD_LIBRARY_PATH = [
-      privateLibrary,
+      cageLibrary,
       runtimeEnvironment.LD_LIBRARY_PATH,
     ].filter(Boolean).join(":");
   }
-  const privateData = path.resolve(
-    options.rootDirectory,
-    ".arena/tools/gamescope-root/usr/share",
-  );
-  if (existsSync(privateData)) {
-    runtimeEnvironment.XDG_DATA_DIRS = [
-      privateData,
-      runtimeEnvironment.XDG_DATA_DIRS ?? "/usr/local/share:/usr/share",
-    ].join(":");
-  }
-
-  const gamescopeProcess = spawn(
-    gamescope,
+  const cageProcess = spawn(
+    cage,
     [
-      "--backend", "headless",
-      "-W", String(GAME_WIDTH),
-      "-H", String(VIDEO_HEIGHT),
-      "-w", String(GAME_WIDTH),
-      "-h", String(VIDEO_HEIGHT),
-      "-r", "30",
-      "--force-windows-fullscreen",
-      "--expose-wayland",
-      "--keep-alive",
       "--",
       process.execPath,
-      hostEntry,
+      cageHostEntry,
+      anchorCommand,
       environmentFile,
     ],
     {
@@ -98,25 +86,38 @@ export async function startVirtualGame(options: {
       stdio: ["ignore", "ignore", "pipe"],
     },
   );
-  gamescopeProcess.stderr?.pipe(createWriteStream(gamescopeLog, { flags: "a" }));
-  const childProcesses: ChildProcess[] = [gamescopeProcess];
+  cageProcess.stderr?.pipe(createWriteStream(compositorLog, { flags: "a" }));
+  const childProcesses: ChildProcess[] = [cageProcess];
 
   try {
     const hostEnvironment = await waitForJsonEnvironment(
       environmentFile,
-      gamescopeProcess,
+      cageProcess,
       30_000,
     );
     const display = hostEnvironment.DISPLAY;
-    const gamescopeDisplay = hostEnvironment.GAMESCOPE_WAYLAND_DISPLAY;
-    if (!display || !gamescopeDisplay) {
-      throw new Error("Gamescope did not report its private displays");
+    if (!display || !hostEnvironment.WAYLAND_DISPLAY) {
+      throw new Error("Cage did not report its private displays");
     }
     const childEnvironment = {
       ...runtimeEnvironment,
       ...hostEnvironment,
     };
-
+    const captureEnvironment: NodeJS.ProcessEnv = {
+      ...runtimeEnvironment,
+      WAYLAND_DISPLAY: hostEnvironment.WAYLAND_DISPLAY,
+      XDG_RUNTIME_DIR: hostEnvironment.XDG_RUNTIME_DIR,
+    };
+    const outputResult = await runCommand("wlr-randr", ["--json"], {
+      env: captureEnvironment,
+      timeoutMs: 5_000,
+    });
+    if (outputResult.code !== 0) {
+      throw new Error(`Cannot inspect private recording output: ${outputResult.stderr.toString("utf8").trim()}`);
+    }
+    const outputs = JSON.parse(outputResult.stdout.toString("utf8")) as Array<{ name?: string }>;
+    const captureOutput = outputs[0]?.name;
+    if (!captureOutput) throw new Error("Private recording output is unavailable");
     if (await steamIsRunning()) {
       throw new Error(
         "Steam is already running. Close it before a headless challenge so it cannot forward the game to the physical desktop.",
@@ -139,7 +140,6 @@ export async function startVirtualGame(options: {
       DISPLAY: steamDisplay,
     };
     delete steamEnvironment.WAYLAND_DISPLAY;
-    delete steamEnvironment.GAMESCOPE_WAYLAND_DISPLAY;
     const steamProcess = spawn("steam", [
       "-inhibitbootstrap",
       "-skipinitialbootstrap",
@@ -156,23 +156,27 @@ export async function startVirtualGame(options: {
     await waitForSteamReady(steamProcess, 30 * 60_000);
 
     const steamRoot = path.join(process.env.HOME ?? "", ".local/share/Steam");
+    const gameEnvironment: NodeJS.ProcessEnv = {
+      ...childEnvironment,
+      STEAM_COMPAT_DATA_PATH: path.join(steamRoot, "steamapps/compatdata", options.game.appId),
+      STEAM_COMPAT_CLIENT_INSTALL_PATH: steamRoot,
+      SteamAppId: options.game.appId,
+      SteamGameId: options.game.appId,
+    };
     const gameProcess = spawn(
-      proton,
-      [
-        "run",
-        options.executable,
-        "-screen-fullscreen", "0",
-        "-screen-width", String(GAME_WIDTH),
-        "-screen-height", String(VIDEO_HEIGHT),
-      ],
+      proton ?? options.game.executable,
+      proton
+        ? [
+            "run",
+            options.game.executable,
+            "-screen-fullscreen", "0",
+            "-screen-width", String(GAME_WIDTH),
+            "-screen-height", String(VIDEO_HEIGHT),
+          ]
+        : [],
       {
-        env: {
-          ...childEnvironment,
-          STEAM_COMPAT_DATA_PATH: path.join(steamRoot, "steamapps/compatdata/1260520"),
-          STEAM_COMPAT_CLIENT_INSTALL_PATH: steamRoot,
-          SteamAppId: "1260520",
-          SteamGameId: "1260520",
-        },
+        env: gameEnvironment,
+        cwd: options.game.installDirectory,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -182,31 +186,39 @@ export async function startVirtualGame(options: {
 
     return {
       display,
-      gamescopeDisplay,
       keypressCommand,
       compositorScreenshot: {
-        command: gamescopeCtl,
-        environment: childEnvironment,
+        command: "grim",
+        arguments: ["-o", captureOutput],
+        environment: captureEnvironment,
+      },
+      captureWayland: {
+        output: captureOutput,
+        environment: captureEnvironment,
       },
       close: async () => {
         stopProcessGroup(gameProcess, "SIGTERM");
         await delay(500);
+        if (proton) {
+          await runCommand(proton, ["runinprefix", "wineserver", "-k"], {
+            env: gameEnvironment,
+            timeoutMs: 5_000,
+          }).catch(() => undefined);
+        }
         await runCommand("steam", ["-shutdown"], {
           env: steamEnvironment,
           timeoutMs: 5_000,
         }).catch(() => undefined);
         stopProcessGroup(steamProcess, "SIGTERM");
-        await runCommand(gamescopeCtl, ["shutdown"], {
-          env: childEnvironment,
-          timeoutMs: 3_000,
-        }).catch(() => undefined);
-        stopProcessGroup(gamescopeProcess, "SIGTERM");
+        stopProcessGroup(cageProcess, "SIGTERM");
         await delay(1_000);
         for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");
+        await rm(waylandRuntimeDirectory, { recursive: true, force: true });
       },
     };
   } catch (error) {
     for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");
+    await rm(waylandRuntimeDirectory, { recursive: true, force: true });
     throw error;
   }
 }
@@ -238,11 +250,18 @@ export async function startVirtualDashboard(options: {
     chromeEnvironment.XDG_SESSION_TYPE = "x11";
     chromeEnvironment.LANGUAGE = "en_US:en";
     chromeEnvironment.LANG = "en_US.UTF-8";
+    const chromeProfile = path.join(options.runtimeDirectory, "dashboard-chrome-profile");
+    await mkdir(path.join(chromeProfile, "Default"), { recursive: true });
+    await writeFile(path.join(chromeProfile, "Default/Preferences"), JSON.stringify({
+      browser: { enable_spellchecking: false },
+      translate: { enabled: false },
+      translate_blocked_languages: ["en", "zh-CN", "zh"],
+    }));
     const chromeProcess = spawn(
       "google-chrome-stable",
       [
         "--ozone-platform=x11",
-        `--user-data-dir=${path.join(options.runtimeDirectory, "dashboard-chrome-profile")}`,
+        `--user-data-dir=${chromeProfile}`,
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
@@ -253,7 +272,7 @@ export async function startVirtualDashboard(options: {
         "--hide-scrollbars",
         "--disable-sync",
         "--disable-translate",
-        "--disable-features=Translate,TranslateUI,OptimizationHints,MediaRouter,PushMessaging",
+        "--disable-features=Translate,TranslateUI,LanguageDetectionAPI,OptimizationHints,MediaRouter,PushMessaging",
         "--lang=en-US",
         "--accept-lang=en-US",
         "--window-position=0,0",
@@ -290,76 +309,25 @@ export async function startVirtualDashboard(options: {
   }
 }
 
-export async function startVirtualGameMirror(options: {
-  rootDirectory: string;
-  runtimeDirectory: string;
-  url: string;
-}): Promise<VirtualGameMirrorRuntime> {
-  const xvfb = await resolveTool(
-    "Xvfb",
-    process.env.ASTRA_XVFB,
-    path.join(options.rootDirectory, ".arena/tools/xvfb-root/usr/bin/Xvfb"),
-  );
-  const display = await freeXDisplay(130, 169);
-  const xvfbProcess = spawn(
-    xvfb,
-    [display, "-screen", "0", `${GAME_WIDTH}x${VIDEO_HEIGHT}x24`, "-br", "-nolisten", "tcp", "-noreset"],
-    { detached: true, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  logChildOutput(xvfbProcess, path.join(options.runtimeDirectory, "game-mirror-xvfb.log"));
-  try {
-    await waitForXDisplay(display, xvfbProcess, 15_000);
-    const environment = withoutPhysicalDisplay(process.env);
-    environment.DISPLAY = display;
-    environment.XDG_SESSION_TYPE = "x11";
-    environment.LANG = "en_US.UTF-8";
-    const chromeProcess = spawn(
-      "google-chrome-stable",
-      [
-        "--ozone-platform=x11",
-        `--user-data-dir=${path.join(options.runtimeDirectory, "game-mirror-chrome-profile")}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-session-crashed-bubble",
-        "--disable-component-update",
-        "--disable-background-networking",
-        "--disable-default-apps",
-        "--disable-extensions",
-        "--hide-scrollbars",
-        "--disable-sync",
-        "--disable-translate",
-        "--disable-features=Translate,TranslateUI,OptimizationHints,MediaRouter,PushMessaging",
-        "--window-position=0,0",
-        `--window-size=${GAME_WIDTH},${VIDEO_HEIGHT}`,
-        `--app=${options.url}/game.html`,
-      ],
-      { env: environment, detached: true, stdio: ["ignore", "pipe", "pipe"] },
-    );
-    logChildOutput(
-      chromeProcess,
-      path.join(options.runtimeDirectory, "game-mirror-chrome.log"),
-    );
-    await delay(2_000);
-    if (chromeProcess.exitCode !== null) throw new Error("Hidden game mirror exited early");
-    return {
-      display,
-      close: async () => {
-        stopProcessGroup(chromeProcess, "SIGTERM");
-        stopProcessGroup(xvfbProcess, "SIGTERM");
-        await delay(500);
-        stopProcessGroup(chromeProcess, "SIGKILL");
-        stopProcessGroup(xvfbProcess, "SIGKILL");
-      },
-    };
-  } catch (error) {
-    stopProcessGroup(xvfbProcess, "SIGKILL");
-    throw error;
-  }
+export function continuousGameRecorderArguments(options: {
+  output: string;
+  outputName: string;
+}): string[] {
+  return [
+    "-D",
+    "-r", "30",
+    "--no-dmabuf",
+    "-o", options.outputName,
+    "-c", "libx264",
+    "-p", "preset=veryfast",
+    "-p", "crf=18",
+    "-p", "keyint=60",
+    "-f", options.output,
+  ];
 }
 
-export function hiddenRecorderArguments(options: {
-  gameDisplay: string;
-  dashboardDisplay: string;
+export function dashboardRecorderArguments(options: {
+  display: string;
   output: string;
 }): string[] {
   return [
@@ -371,17 +339,9 @@ export function hiddenRecorderArguments(options: {
     "-f", "x11grab",
     "-draw_mouse", "0",
     "-framerate", "30",
-    "-video_size", `${GAME_WIDTH}x${VIDEO_HEIGHT}`,
-    "-i", `${options.gameDisplay}.0`,
-    "-thread_queue_size", "512",
-    "-f", "x11grab",
-    "-draw_mouse", "0",
-    "-framerate", "30",
     "-video_size", `${DASHBOARD_WIDTH}x${VIDEO_HEIGHT}`,
-    "-i", `${options.dashboardDisplay}.0`,
-    "-filter_complex",
-    `[0:v]crop=${GAME_WIDTH - CHROME_APP_INSET}:${VIDEO_HEIGHT - CHROME_APP_INSET}:${CHROME_APP_INSET}:${CHROME_APP_INSET},scale=${GAME_WIDTH}:${VIDEO_HEIGHT}:flags=lanczos,setsar=1,setpts=N/(30*TB)[g];[1:v]scale=${DASHBOARD_WIDTH}:${VIDEO_HEIGHT}:flags=lanczos,setsar=1,setpts=N/(30*TB)[d];[g][d]hstack=inputs=2:shortest=1,fps=30,setpts=N/(30*TB)[v]`,
-    "-map", "[v]",
+    "-i", `${options.display}.0`,
+    "-vf", "setsar=1,setpts=N/(30*TB)",
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "18",
@@ -405,11 +365,34 @@ async function ensureKeypressHelper(rootDirectory: string): Promise<string> {
   if (rebuild) {
     const result = await runCommand(
       "cc",
-      ["-O2", "-Wall", "-Wextra", "-Werror", source, "-o", output, "-lX11", "-lXtst"],
+      ["-O2", "-Wall", "-Wextra", "-Werror", source, "-o", output, "-lX11", "-lXtst", "-lm"],
       { timeoutMs: 30_000 },
     );
     if (result.code !== 0) {
       throw new Error(`Cannot build X11 key helper: ${result.stderr.toString("utf8").trim()}`);
+    }
+  }
+  return output;
+}
+
+async function ensureX11Anchor(rootDirectory: string): Promise<string> {
+  const output = path.join(rootDirectory, ".arena/bin/astra-x11-anchor");
+  const source = path.join(rootDirectory, "native/x11-anchor.c");
+  await mkdir(path.dirname(output), { recursive: true });
+  let rebuild = true;
+  try {
+    rebuild = (await stat(output)).mtimeMs < (await stat(source)).mtimeMs;
+  } catch {
+    rebuild = true;
+  }
+  if (rebuild) {
+    const result = await runCommand(
+      "cc",
+      ["-O2", "-Wall", "-Wextra", "-Werror", source, "-o", output, "-lX11"],
+      { timeoutMs: 30_000 },
+    );
+    if (result.code !== 0) {
+      throw new Error(`Cannot build X11 anchor: ${result.stderr.toString("utf8").trim()}`);
     }
   }
   return output;
@@ -484,7 +467,7 @@ async function waitForJsonEnvironment(
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
-    if (process.exitCode !== null) throw new Error("Gamescope exited before it was ready");
+    if (process.exitCode !== null) throw new Error("Private compositor exited before it was ready");
     try {
       return JSON.parse(await readFile(filename, "utf8")) as Record<string, string>;
     } catch (error) {
@@ -492,7 +475,7 @@ async function waitForJsonEnvironment(
       await delay(100);
     }
   }
-  throw lastError instanceof Error ? lastError : new Error("Gamescope startup timed out");
+  throw lastError instanceof Error ? lastError : new Error("Private compositor startup timed out");
 }
 
 async function waitForXDisplay(

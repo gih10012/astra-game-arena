@@ -37,6 +37,8 @@ export interface TokenSnapshot extends TokenUsage {
 export interface ChallengeSnapshot {
   runId: string | null;
   model: string;
+  goal: string;
+  game: { appId: string; name: string } | null;
   attempt: number;
   status: ChallengeStatus;
   targetLevels: number;
@@ -44,6 +46,7 @@ export interface ChallengeSnapshot {
   time: TimeSnapshot;
   tokens: TokenSnapshot;
   failure: string | null;
+  completion: { summary: string; declaredAt: string } | null;
 }
 
 export interface GameFrame {
@@ -65,6 +68,62 @@ export const allowedKeys = [
   "ENTER",
   "ESCAPE",
   "SPACE",
+  "TAB",
+  "BACKSPACE",
+  "DELETE",
+  "HOME",
+  "END",
+  "PAGEUP",
+  "PAGEDOWN",
+  "SHIFT",
+  "CTRL",
+  "ALT",
+  "A",
+  "B",
+  "C",
+  "D",
+  "E",
+  "F",
+  "G",
+  "H",
+  "I",
+  "J",
+  "K",
+  "L",
+  "M",
+  "N",
+  "O",
+  "P",
+  "Q",
+  "S",
+  "T",
+  "U",
+  "V",
+  "W",
+  "X",
+  "Y",
+  "0",
+  "1",
+  "2",
+  "3",
+  "4",
+  "5",
+  "6",
+  "7",
+  "8",
+  "9",
+  "F1",
+  "F2",
+  "F3",
+  "F4",
+  "F5",
+  "F6",
+  "F7",
+  "F8",
+  "F9",
+  "F10",
+  "F11",
+  "F12",
 ] as const;
 
 export type AllowedKey = (typeof allowedKeys)[number];
@@ -76,5 +135,15 @@ export interface GameAdapter {
     keys: AllowedKey[],
     options: { intervalMs: number; settleMs: number },
   ): Promise<void>;
+  typeText?(text: string, options: { intervalMs: number; settleMs: number }): Promise<void>;
+  movePointer?(x: number, y: number): Promise<void>;
+  clickPointer?(
+    x: number,
+    y: number,
+    button: "left" | "middle" | "right",
+    count: number,
+  ): Promise<void>;
+  dragPointer?(fromX: number, fromY: number, toX: number, toY: number, durationMs: number): Promise<void>;
+  scrollPointer?(x: number, y: number, deltaX: number, deltaY: number): Promise<void>;
   close?(): Promise<void>;
 }

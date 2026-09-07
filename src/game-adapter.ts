@@ -18,142 +18,70 @@ const keyNames: Record<AllowedKey, string> = {
   ENTER: "Return",
   ESCAPE: "Escape",
   SPACE: "space",
+  TAB: "Tab",
+  BACKSPACE: "BackSpace",
+  DELETE: "Delete",
+  HOME: "Home",
+  END: "End",
+  PAGEUP: "Page_Up",
+  PAGEDOWN: "Page_Down",
+  SHIFT: "Shift_L",
+  CTRL: "Control_L",
+  ALT: "Alt_L",
+  A: "a",
+  B: "b",
+  C: "c",
+  D: "d",
+  E: "e",
+  F: "f",
+  G: "g",
+  H: "h",
+  I: "i",
+  J: "j",
+  K: "k",
+  L: "l",
+  M: "m",
+  N: "n",
+  O: "o",
+  P: "p",
+  Q: "q",
+  S: "s",
+  T: "t",
+  U: "u",
+  V: "v",
+  W: "w",
+  X: "x",
+  Y: "y",
+  "0": "0",
+  "1": "1",
+  "2": "2",
+  "3": "3",
+  "4": "4",
+  "5": "5",
+  "6": "6",
+  "7": "7",
+  "8": "8",
+  "9": "9",
+  F1: "F1",
+  F2: "F2",
+  F3: "F3",
+  F4: "F4",
+  F5: "F5",
+  F6: "F6",
+  F7: "F7",
+  F8: "F8",
+  F9: "F9",
+  F10: "F10",
+  F11: "F11",
+  F12: "F12",
 };
 
 const X11_KEY_HOLD_MS = 80;
 
-interface NiriWindow {
+interface PrivateGameWindow {
   id: number;
   title: string;
   app_id: string;
-}
-
-export class NiriGameAdapter implements GameAdapter {
-  readonly frameDirectory: string;
-  readonly titlePattern: RegExp;
-  #window: NiriWindow | null = null;
-  #captureCounter = 0;
-  #serial: Promise<unknown> = Promise.resolve();
-
-  constructor(options: { frameDirectory: string; titlePattern?: RegExp }) {
-    this.frameDirectory = options.frameDirectory;
-    this.titlePattern = options.titlePattern ?? /Patrick'?s Parabox/i;
-  }
-
-  async discover(): Promise<{ windowId: number; title: string }> {
-    const stdout = await expectCommand("niri", ["msg", "--json", "windows"]);
-    const windows = JSON.parse(stdout.toString("utf8")) as NiriWindow[];
-    const match = windows.find(
-      (window) =>
-        this.titlePattern.test(window.title) ||
-        this.titlePattern.test(window.app_id),
-    );
-    if (!match) throw new Error("Patrick's Parabox window not found");
-    this.#window = match;
-    return { windowId: match.id, title: match.title };
-  }
-
-  async capture(): Promise<GameFrame> {
-    return await this.#exclusive(async () => {
-      const window = this.#window ?? (await this.#discoverWindow());
-      await mkdir(this.frameDirectory, { recursive: true });
-      const number = String(++this.#captureCounter).padStart(8, "0");
-      const pngPath = path.join(this.frameDirectory, `${number}.png`);
-      const jpegPath = path.join(this.frameDirectory, `${number}.jpg`);
-      await expectCommand("niri", [
-        "msg",
-        "action",
-        "screenshot-window",
-        "--id",
-        String(window.id),
-        "--write-to-disk",
-        "true",
-        "--show-pointer",
-        "false",
-        "--path",
-        pngPath,
-      ]);
-      await expectCommand("ffmpeg", [
-        "-nostdin",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        pngPath,
-        "-vf",
-        "scale='min(1280,iw)':-2",
-        "-frames:v",
-        "1",
-        "-q:v",
-        "3",
-        jpegPath,
-      ]);
-      const data = await readFile(jpegPath);
-      await rm(pngPath, { force: true });
-      return {
-        data,
-        mimeType: "image/jpeg",
-        sha256: createHash("sha256").update(data).digest("hex"),
-        capturedAt: new Date().toISOString(),
-      };
-    });
-  }
-
-  async press(
-    keys: AllowedKey[],
-    options: { intervalMs: number; settleMs: number },
-  ): Promise<void> {
-    await this.#exclusive(async () => {
-      const window = this.#window ?? (await this.#discoverWindow());
-      await expectCommand("niri", [
-        "msg",
-        "action",
-        "focus-window",
-        "--id",
-        String(window.id),
-      ]);
-      const args: string[] = [];
-      keys.forEach((key, index) => {
-        if (index > 0 && options.intervalMs > 0) {
-          args.push("-s", String(options.intervalMs));
-        }
-        args.push("-k", keyNames[key]);
-      });
-      await expectCommand("wtype", args, {
-        timeoutMs: Math.max(15_000, keys.length * options.intervalMs + 5_000),
-      });
-      if (options.settleMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, options.settleMs));
-      }
-    });
-  }
-
-  async close(): Promise<void> {
-    if (!this.#window) return;
-    await expectCommand("niri", [
-      "msg",
-      "action",
-      "close-window",
-      "--id",
-      String(this.#window.id),
-    ]);
-    this.#window = null;
-  }
-
-  async #discoverWindow(): Promise<NiriWindow> {
-    await this.discover();
-    if (!this.#window) throw new Error("Game window discovery failed");
-    return this.#window;
-  }
-
-  async #exclusive<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.#serial.then(operation, operation);
-    this.#serial = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return await result;
-  }
 }
 
 export class X11GameAdapter implements GameAdapter {
@@ -163,9 +91,10 @@ export class X11GameAdapter implements GameAdapter {
   readonly titlePattern: RegExp;
   readonly compositorScreenshot: {
     command: string;
+    arguments: string[];
     environment: NodeJS.ProcessEnv;
   } | undefined;
-  #window: NiriWindow | null = null;
+  #window: PrivateGameWindow | null = null;
   #captureCounter = 0;
   #serial: Promise<unknown> = Promise.resolve();
 
@@ -176,6 +105,7 @@ export class X11GameAdapter implements GameAdapter {
     titlePattern?: RegExp;
     compositorScreenshot?: {
       command: string;
+      arguments: string[];
       environment: NodeJS.ProcessEnv;
     };
   }) {
@@ -191,14 +121,18 @@ export class X11GameAdapter implements GameAdapter {
       "-display",
       this.display,
       "-root",
-      "GAMESCOPE_FOCUSABLE_WINDOWS",
-      "GAMESCOPE_FOCUSED_WINDOW",
+      "_NET_CLIENT_LIST_STACKING",
+      "_NET_ACTIVE_WINDOW",
     ]);
-    const ids = [...new Set(
-      [...root.toString("utf8").matchAll(/\b\d{4,}\b/g)].map((match) =>
+    const properties = root.toString("utf8");
+    const ids = [...new Set([
+      ...[...properties.matchAll(/0x[0-9a-f]+/gi)].map((match) =>
+        Number.parseInt(match[0].slice(2), 16),
+      ),
+      ...[...properties.matchAll(/\b\d{4,}\b/g)].map((match) =>
         Number(match[0]),
       ),
-    )].filter((id) => Number.isSafeInteger(id) && id > 0);
+    ])].filter((id) => Number.isSafeInteger(id) && id > 0).reverse();
     for (const id of ids) {
       const result = await runCommand("xprop", [
         "-display",
@@ -215,11 +149,11 @@ export class X11GameAdapter implements GameAdapter {
       const title =
         /(?:_NET_WM_NAME|WM_NAME)[^(]*\([^)]*\)\s*=\s*"([^"]+)"/.exec(
           properties,
-        )?.[1] ?? "Patrick's Parabox";
-      this.#window = { id, title, app_id: "steam_app_1260520" };
+        )?.[1] ?? "Steam game";
+      this.#window = { id, title, app_id: "steam_game" };
       return { windowId: id, title };
     }
-    throw new Error("Patrick's Parabox window not found on the private X display");
+    throw new Error("Selected game window not found on the private X display");
   }
 
   async capture(): Promise<GameFrame> {
@@ -232,7 +166,7 @@ export class X11GameAdapter implements GameAdapter {
       if (this.compositorScreenshot) {
         await expectCommand(
           this.compositorScreenshot.command,
-          ["screenshot", pngPath],
+          [...this.compositorScreenshot.arguments, pngPath],
           { env: this.compositorScreenshot.environment, timeoutMs: 10_000 },
         );
         await waitForStableFile(pngPath, 10_000);
@@ -269,6 +203,38 @@ export class X11GameAdapter implements GameAdapter {
     });
   }
 
+  async waitForVisibleFrame(
+    timeoutMs: number,
+    cancelled: () => boolean = () => false,
+  ): Promise<{ frame: GameFrame; filename: string }> {
+    const deadline = Date.now() + timeoutMs;
+    let lastError: unknown;
+    while (Date.now() < deadline && !cancelled()) {
+      try {
+        const frame = await this.capture();
+        const filename = path.join(
+          this.frameDirectory,
+          `${String(this.#captureCounter).padStart(8, "0")}.jpg`,
+        );
+        if (await frameHasVisiblePixels(filename)) return { frame, filename };
+      } catch (error) {
+        lastError = error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    if (cancelled()) throw new Error("Game startup cancelled");
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Game did not present a visible frame before the timeout");
+  }
+
+  latestFrameFilename(): string {
+    return path.join(
+      this.frameDirectory,
+      `${String(this.#captureCounter).padStart(8, "0")}.jpg`,
+    );
+  }
+
   async press(
     keys: AllowedKey[],
     options: { intervalMs: number; settleMs: number },
@@ -297,14 +263,86 @@ export class X11GameAdapter implements GameAdapter {
     });
   }
 
+  async typeText(
+    text: string,
+    options: { intervalMs: number; settleMs: number },
+  ): Promise<void> {
+    if (Buffer.byteLength(text, "utf8") > 4_096 || /[^\x09\x0a\x20-\x7e]/.test(text)) {
+      throw new Error("typeText accepts at most 4096 printable ASCII characters");
+    }
+    await this.#input([
+      "type",
+      String(options.intervalMs),
+      String(options.settleMs),
+      text,
+    ], Math.max(15_000, text.length * (options.intervalMs + 30) + options.settleMs + 5_000));
+  }
+
+  async movePointer(x: number, y: number): Promise<void> {
+    await this.#input(["move", String(x), String(y)]);
+  }
+
+  async clickPointer(
+    x: number,
+    y: number,
+    button: "left" | "middle" | "right",
+    count: number,
+  ): Promise<void> {
+    const buttonNumber = button === "left" ? 1 : button === "middle" ? 2 : 3;
+    await this.#input(["click", String(x), String(y), String(buttonNumber), String(count)]);
+  }
+
+  async dragPointer(
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    durationMs: number,
+  ): Promise<void> {
+    await this.#input([
+      "drag",
+      String(fromX),
+      String(fromY),
+      String(toX),
+      String(toY),
+      String(durationMs),
+    ], Math.max(15_000, durationMs + 5_000));
+  }
+
+  async scrollPointer(
+    x: number,
+    y: number,
+    deltaX: number,
+    deltaY: number,
+  ): Promise<void> {
+    await this.#input([
+      "scroll",
+      String(x),
+      String(y),
+      String(deltaX),
+      String(deltaY),
+    ]);
+  }
+
   async close(): Promise<void> {
     this.#window = null;
   }
 
-  async #discoverWindow(): Promise<NiriWindow> {
+  async #discoverWindow(): Promise<PrivateGameWindow> {
     await this.discover();
     if (!this.#window) throw new Error("Game window discovery failed");
     return this.#window;
+  }
+
+  async #input(args: string[], timeoutMs = 15_000): Promise<void> {
+    await this.#exclusive(async () => {
+      const window = this.#window ?? (await this.#discoverWindow());
+      await expectCommand(
+        this.keypressCommand,
+        [this.display, String(window.id), ...args],
+        { timeoutMs },
+      );
+    });
   }
 
   async #exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -329,6 +367,19 @@ async function waitForStableFile(filename: string, timeoutMs: number): Promise<v
   throw new Error(`Timed out waiting for compositor screenshot: ${filename}`);
 }
 
+async function frameHasVisiblePixels(filename: string): Promise<boolean> {
+  const result = await runCommand("ffmpeg", [
+    "-nostdin", "-hide_banner", "-loglevel", "info",
+    "-i", filename,
+    "-vf", "signalstats,metadata=print",
+    "-frames:v", "1",
+    "-f", "null", "-",
+  ], { timeoutMs: 10_000 });
+  const output = `${result.stdout.toString("utf8")}\n${result.stderr.toString("utf8")}`;
+  const maximum = Number(/lavfi\.signalstats\.YMAX=([\d.]+)/.exec(output)?.[1]);
+  return result.code === 0 && Number.isFinite(maximum) && maximum > 1;
+}
+
 const pixel = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
@@ -338,7 +389,7 @@ export class MockGameAdapter implements GameAdapter {
   presses: AllowedKey[][] = [];
 
   async discover() {
-    return { windowId: 1, title: "Patrick's Parabox (mock)" };
+    return { windowId: 1, title: "Steam game (mock)" };
   }
 
   async capture(): Promise<GameFrame> {

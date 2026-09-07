@@ -12,6 +12,7 @@ import {
 import { runCommand } from "./command.js";
 import { parseParaboxSave } from "./save-parser.js";
 import { TARGET_LEVELS } from "./types.js";
+import { discoverInstalledSteamGames } from "./steam-catalog.js";
 
 export interface DoctorCheck {
   name: string;
@@ -92,22 +93,30 @@ export async function runDoctor(options: { codexHome?: string } = {}): Promise<D
     commandCheck("xprop"),
     commandCheck("cc"),
     commandOrFileCheck(
-      "gamescope",
-      path.resolve(".arena/tools/gamescope-root/usr/bin/gamescope"),
-    ),
-    commandOrFileCheck(
       "Xvfb",
       path.resolve(".arena/tools/xvfb-root/usr/bin/Xvfb"),
     ),
+    commandOrFileCheck(
+      "cage",
+      path.resolve(".arena/tools/cage-root/usr/bin/cage"),
+    ),
+    commandCheck("wlr-randr"),
+    commandCheck("grim"),
+    commandCheck("wf-recorder"),
     commandCheck("google-chrome-stable"),
     commandCheck("steam"),
-    commandCheck("niri", false),
-    commandCheck("wtype", false),
-    commandCheck("wf-recorder", false),
-    fileCheck("Patrick's Parabox manifest", paths.manifest),
-    fileCheck("Patrick's Parabox executable", paths.executable),
-    fileCheck("Patrick's Parabox save directory", paths.saveDirectory),
+    fileCheck("Parabox manifest adapter", paths.manifest, false),
+    fileCheck("Parabox executable adapter", paths.executable, false),
+    fileCheck("Parabox save adapter", paths.saveDirectory, false),
   ]);
+
+  const installedGames = await discoverInstalledSteamGames();
+  checks.push({
+    name: "launchable Steam games",
+    ok: installedGames.length > 0,
+    detail: `${installedGames.length} candidate(s) detected`,
+    required: true,
+  });
 
   const loginResult = await runCommand(CODEX_COMMAND, ["login", "status"], {
     env: codexEnv,
@@ -164,10 +173,10 @@ export async function runDoctor(options: { codexHome?: string } = {}): Promise<D
     }
   }
   checks.push({
-    name: "official level catalog",
+    name: "Parabox official level catalog",
     ok: detectedTotal === TARGET_LEVELS,
     detail: `${detectedTotal}/${TARGET_LEVELS} entries detected in local save format`,
-    required: true,
+    required: false,
   });
 
   return checks;

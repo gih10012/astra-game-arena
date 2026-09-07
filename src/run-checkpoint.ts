@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import type { LevelProgress, TokenUsage } from "./types.js";
+import type { InstalledSteamGame } from "./steam-catalog.js";
 
 export const CHECKPOINT_FILENAME = "checkpoint.json";
 
@@ -18,13 +19,31 @@ export type RunPhase =
 
 export interface PersistedRunOptions {
   rootDirectory: string;
+  publicPort?: number;
   port: number;
-  reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max";
+  model?: string;
+  goal?: string;
+  game?: InstalledSteamGame;
+  reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   record: boolean;
   openDashboard: boolean;
   isolateSaves: boolean;
   codexHome?: string;
   quotaWaitMs: number;
+  accountPolicies?: AccountPolicy[];
+}
+
+export interface AccountPolicy {
+  accountId: string;
+  enabled: boolean;
+  reserveFiveHourPercent: number;
+  reserveWeeklyPercent: number;
+}
+
+export interface RecordingPair {
+  attempt: number;
+  game: string;
+  dashboard: string;
 }
 
 export interface RunCheckpoint {
@@ -47,6 +66,7 @@ export interface RunCheckpoint {
   tokenCursor?: TokenUsage | null;
   progress: LevelProgress;
   recordings: string[];
+  recordingPairs?: RecordingPair[];
   options: PersistedRunOptions;
 }
 

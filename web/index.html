@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Astra × Parabox Arena</title>
+    <title>Astra Game Arena</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -12,20 +12,79 @@
         <div class="identity">
           <span class="mark">A</span>
           <div>
-            <h1>ASTRA × PARABOX</h1>
-            <p>screen-only benchmark · public audit</p>
+            <h1>ASTRA GAME ARENA</h1>
+            <p>isolated computer-use benchmark · public audit</p>
           </div>
         </div>
-        <div class="badges">
-          <span class="badge safe"><i></i> WEB SEARCH OFF</span>
-          <span class="badge">364 OFFICIAL LEVELS</span>
+        <div class="top-actions">
+          <div class="badges">
+            <span class="badge safe"><i></i> WEB SEARCH OFF</span>
+            <span class="badge"><i id="daemon-dot"></i> SUPERVISOR <b id="daemon-state">ONLINE</b></span>
+          </div>
+          <button id="configure-button" class="secondary">配置挑战</button>
+          <button id="pause-button" class="secondary" disabled>暂停</button>
+          <button id="resume-button" class="secondary" disabled>继续</button>
+          <button id="end-button" class="danger" disabled>结束</button>
         </div>
       </header>
+
+      <section id="configuration" class="configuration" hidden>
+        <div class="configuration-head">
+          <div>
+            <span class="eyebrow">NEW CHALLENGE</span>
+            <h2>挑战设置</h2>
+          </div>
+          <button id="configuration-close" class="icon-button" aria-label="关闭">×</button>
+        </div>
+        <form id="challenge-form">
+          <div class="form-grid">
+            <label class="field">
+              <span>Steam 游戏</span>
+              <select id="game-select" name="gameAppId" required></select>
+              <small id="game-detail">扫描本机已安装游戏</small>
+            </label>
+            <label class="field model-field">
+              <span>模型</span>
+              <select id="model-select" name="model" required></select>
+            </label>
+            <label class="field effort-field">
+              <span>推理强度</span>
+              <select id="reasoning-select" name="reasoningEffort" required></select>
+            </label>
+            <label class="record-switch">
+              <input id="record-toggle" name="record" type="checkbox" checked />
+              <span class="switch"></span>
+              <span><b>录制正式视频</b><small>原生游戏流 + 完整 Codex 会话，1920×1080 / 30 fps</small></span>
+            </label>
+            <label class="field goal-field">
+              <span>自然语言目标</span>
+              <textarea id="goal-input" name="goal" rows="3" maxlength="4000" required placeholder="例如：完成 Patrick's Parabox 的全部官方关卡"></textarea>
+              <small>Agent 自行判断何时完成，并调用结束工具保存最终证据。</small>
+            </label>
+          </div>
+
+          <div class="pool-section">
+            <div class="pool-heading">
+              <div>
+                <span class="eyebrow">MODEL POOL</span>
+                <h3>账号池与额度保留</h3>
+              </div>
+              <small>每个账号分别设置保留比例；达到任一阈值就切换或等待。</small>
+            </div>
+            <div id="account-pool" class="account-pool"></div>
+          </div>
+          <div class="form-actions">
+            <p id="form-message"></p>
+            <button id="start-button" type="submit" class="primary">从零开始挑战</button>
+          </div>
+        </form>
+      </section>
 
       <section class="metrics" aria-label="Challenge metrics">
         <article>
           <label>ELAPSED</label>
           <strong id="elapsed">00:00:00.000</strong>
+          <small>active time only</small>
         </article>
         <article>
           <label>TOKENS</label>
@@ -33,28 +92,28 @@
           <small id="token-breakdown">0 in · 0 out</small>
         </article>
         <article>
-          <label>PROGRESS</label>
-          <strong><span id="complete">0</span><em>/364</em></strong>
-          <div class="bar"><span id="progress-bar"></span></div>
+          <label>GAME / GOAL</label>
+          <strong id="game-name">NO RUN</strong>
+          <small id="goal-summary">configure a challenge</small>
         </article>
         <article>
-          <label>MODEL</label>
+          <label>MODEL / STATUS</label>
           <strong id="model">GPT-6-ASTRA</strong>
-          <small id="status">READY</small>
+          <small><span id="status">IDLE</span> · <span id="recording-state">REC OFF</span></small>
         </article>
       </section>
 
       <main>
         <section class="game-panel">
           <div class="panel-head">
-            <span>GAME FEED</span>
+            <span>PRIVATE GAME DESKTOP</span>
             <small id="frame-time">awaiting frame</small>
           </div>
           <div class="game-stage">
-            <img id="game-frame" alt="Patrick's Parabox game feed" />
+            <img id="game-frame" alt="Isolated Steam game feed" />
             <div id="frame-placeholder">
-              <div class="recursive-box"><div><div></div></div></div>
-              <p>Native game remains the source of truth</p>
+              <div class="desktop-glyph"><span></span></div>
+              <p>守护进程在线 · 等待挑战</p>
             </div>
           </div>
         </section>
@@ -67,16 +126,24 @@
           <div id="transcript" class="transcript" aria-live="polite">
             <div class="event system" data-placeholder="true">
               <time>SYS</time>
-              <div class="event-body"><p>Waiting for the challenge runner.</p></div>
+              <div class="event-body"><p>Waiting for a challenge.</p></div>
             </div>
           </div>
         </section>
       </main>
 
+      <section id="runtime-strip" class="runtime-strip">
+        <div><span>ACCOUNT</span><b id="active-account">—</b></div>
+        <div><span>5H WINDOW</span><b id="five-hour">—</b></div>
+        <div><span>WEEKLY</span><b id="weekly">—</b></div>
+        <div><span>NEXT ACTION</span><b id="next-action">ready</b></div>
+        <div><span>VIDEO PARTS</span><b id="video-parts">0</b></div>
+      </section>
+
       <footer>
         <span>OBSERVATION: PIXELS ONLY</span>
-        <span>ACTIONS: KEYBOARD ONLY</span>
-        <span>MONOTONIC CLOCK</span>
+        <span>ACTIONS: PRIVATE MOUSE + KEYBOARD</span>
+        <span>NETWORK SEARCH: DISABLED</span>
         <span>SHA-256 AUDIT TRAIL</span>
       </footer>
     </div>

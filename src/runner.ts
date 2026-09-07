@@ -37,14 +37,17 @@ import { ArenaController } from "./controller.js";
 import { defaultGamePaths } from "./doctor.js";
 import { X11GameAdapter } from "./game-adapter.js";
 import {
-  hiddenRecorderArguments,
   startVirtualDashboard,
   startVirtualGame,
-  startVirtualGameMirror,
   type VirtualDashboardRuntime,
   type VirtualGameRuntime,
-  type VirtualGameMirrorRuntime,
 } from "./headless-display.js";
+import {
+  recoverRecordingPairs,
+  startRecordingPair,
+  stopAndComposeRecordingPair,
+  type ActiveRecordingPair,
+} from "./recording-pair.js";
 import { RolloutTailer } from "./rollout-tailer.js";
 import { assembleRecordings, type RecordingAssembly } from "./recording-assembly.js";
 import {
@@ -56,6 +59,7 @@ import {
   registerActiveRun,
   type RunCheckpoint,
   type RunPhase,
+  type AccountPolicy,
 } from "./run-checkpoint.js";
 import { SaveGuard } from "./save-guard.js";
 import {
@@ -70,11 +74,15 @@ import {
   type GameFrame,
   type LevelProgress,
 } from "./types.js";
+import {
+  findInstalledSteamGame,
+  type InstalledSteamGame,
+} from "./steam-catalog.js";
 
-export const NEUTRAL_PROMPT =
-  "Complete all 364 official levels in Patrick's Parabox. Use the Parabox tools for game observation and control. Do not search or browse the internet.";
+export const DEFAULT_GOAL = "Complete all official levels in Patrick's Parabox.";
+export const NEUTRAL_PROMPT = initialPrompt(DEFAULT_GOAL, "Patrick's Parabox");
 export const RESUME_PROMPT =
-  "Continue the same task from the current game state. Do not search or browse the internet.";
+  "Continue the same goal from the current game and conversation state. Use only the private game computer tools for observation and input. Do not search or browse the internet. Call complete_challenge only after visually verifying the goal is fully achieved.";
 
 const DEFAULT_QUOTA_WAIT_MS = 5 * 60 * 60 * 1_000;
 const QUOTA_RESET_GRACE_MS = 60_000;
@@ -82,13 +90,18 @@ const QUOTA_RESET_GRACE_MS = 60_000;
 export interface RunOptions {
   rootDirectory: string;
   port?: number;
-  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max";
+  publicPort?: number;
+  model?: string;
+  goal?: string;
+  gameAppId?: string;
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   record?: boolean;
   openDashboard?: boolean;
   isolateSaves?: boolean;
   output?: string;
   codexHome?: string;
   quotaWaitMs?: number;
+  accountPolicies?: AccountPolicy[];
 }
 
 export interface RunOutcome {
@@ -124,15 +137,23 @@ async function initializeChallenge(
   );
   const rootDirectory = path.resolve(options.rootDirectory);
   const codexHome = await resolveCodexHome(options.codexHome);
+  const game = await findInstalledSteamGame(options.gameAppId ?? "1260520");
+  const model = normalizeModel(options.model ?? "gpt-6-astra");
+  const goal = normalizeGoal(options.goal ?? DEFAULT_GOAL);
   const now = new Date().toISOString();
   const persistedOptions: RunCheckpoint["options"] = {
     rootDirectory,
-    port: options.port ?? 4317,
+    publicPort: options.publicPort ?? 4317,
+    port: options.port ?? 4318,
+    model,
+    goal,
+    game,
     reasoningEffort: options.reasoningEffort ?? "high",
     record: options.record !== false,
     openDashboard: options.openDashboard === true,
-    isolateSaves: options.isolateSaves !== false,
+    isolateSaves: game.appId === "1260520" && options.isolateSaves !== false,
     quotaWaitMs: options.quotaWaitMs ?? DEFAULT_QUOTA_WAIT_MS,
+    accountPolicies: options.accountPolicies ?? [],
     ...(codexHome ? { codexHome } : {}),
   };
   const initialCheckpoint: RunCheckpoint = {
@@ -155,19 +176,21 @@ async function initializeChallenge(
     tokenCursor: null,
     progress: { total: 0, unlocked: 0, completed: 0 },
     recordings: [],
+    recordingPairs: [],
     options: persistedOptions,
   };
   const audit = new AuditLog(runDirectory);
   const runConfig = {
     runId,
     createdAt: now,
-    model: "gpt-6-astra",
+    model,
     reasoningEffort: persistedOptions.reasoningEffort,
-    prompt: NEUTRAL_PROMPT,
+    goal,
+    prompt: initialPrompt(goal, game.name),
     resumePrompt: RESUME_PROMPT,
-    targetLevels: TARGET_LEVELS,
+    targetLevels: game.appId === "1260520" ? TARGET_LEVELS : null,
     observationPolicy: "pixels-only",
-    actionPolicy: "keyboard-only",
+    actionPolicy: "isolated-keyboard-and-mouse",
     webSearch: "disabled",
     networkBrowser: "disabled",
     shellNetwork: "disabled",
@@ -176,8 +199,8 @@ async function initializeChallenge(
     codexHome: displayCodexHome(codexHome),
     saveIsolation: persistedOptions.isolateSaves,
     recording: persistedOptions.record,
-    displayBackend: "gamescope-headless",
-    recordingBackend: "gamescope-snapshot-mirror+ffmpeg-x11grab",
+    displayBackend: "cage-headless-xwayland",
+    recordingBackend: "cage-wlr-screencopy+native-cfr-composite",
     physicalDesktopWindows: persistedOptions.openDashboard ? "monitor-only" : "none",
     resumable: true,
     quotaWaitMs: persistedOptions.quotaWaitMs,
@@ -191,6 +214,7 @@ async function initializeChallenge(
   if (queued) {
     await audit.append("challenge.queued", {
       supervisor: "astra-parabox-watchdog.service",
+      controlPlane: `http://127.0.0.1:${persistedOptions.publicPort}`,
     });
   }
   await registerActiveRun(rootDirectory, runDirectory);
@@ -275,9 +299,29 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   await mkdir(workDirectory, { recursive: true });
   await mkdir(path.join(runDirectory, "recordings"), { recursive: true });
 
+  const selectedGame = prior.options.game ?? await findInstalledSteamGame("1260520");
   const paths = defaultGamePaths();
+  const isParabox = selectedGame.appId === "1260520";
   const audit = new AuditLog(runDirectory);
-  const state = new ChallengeState("gpt-6-astra", TARGET_LEVELS, attempt);
+  if (prior.options.record && prior.recordingPairs) {
+    const recovered = await recoverRecordingPairs(runDirectory, prior.recordingPairs);
+    if (recovered.recordings.length > 0) {
+      await checkpointStore.update((current) => ({
+        recordings: [...new Set([...current.recordings, ...recovered.recordings])],
+      }));
+      await audit.append("recording.recovered", { recordings: recovered.recordings });
+    }
+    for (const warning of recovered.warnings) {
+      await audit.append("recording.recovery.warning", warning);
+    }
+  }
+  const state = new ChallengeState(
+    prior.options.model ?? "gpt-6-astra",
+    isParabox ? TARGET_LEVELS : 0,
+    attempt,
+    prior.options.goal ?? DEFAULT_GOAL,
+    { appId: selectedGame.appId, name: selectedGame.name },
+  );
   const isColdResume = prior.attempt > 0;
   const saveGuard = new SaveGuard(paths.saveDirectory, runDirectory);
   const codexHome = prior.options.codexHome;
@@ -291,8 +335,8 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       inheritCodexConfiguration(profile.home, codexHome),
     ),
   );
-  const accountPool = accountProfiles.length >= 2
-    ? await AccountPool.open(runDirectory, accountProfiles)
+  const accountPool = accountProfiles.length > 0
+    ? await AccountPool.open(runDirectory, accountProfiles, prior.options.accountPolicies)
     : null;
   await checkpointStore.update({
     phase: "starting",
@@ -305,13 +349,13 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   await audit.append("attempt.started", { attempt, resumed: attempt > 1 });
 
   let codex: ChildProcess | null = null;
-  let recorder: ChildProcess | null = null;
+  let recorder: ActiveRecordingPair | null = null;
   let browser: ChildProcess | null = null;
   let game: X11GameAdapter | null = null;
   let controller: ArenaController | null = null;
   let virtualGame: VirtualGameRuntime | null = null;
   let virtualDashboard: VirtualDashboardRuntime | null = null;
-  let virtualGameMirror: VirtualGameMirrorRuntime | null = null;
+  let holdingOverlay: ChildProcess | null = null;
   let gameWindow: { windowId: number; title: string } | null = null;
   const tailers = new Set<RolloutTailer>();
   const tailerTasks = new Set<Promise<void>>();
@@ -342,16 +386,35 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   const stopRecording = async () => {
     const activeRecorder = recorder;
     recorder = null;
-    if (activeRecorder?.exitCode === null) {
-      activeRecorder.kill("SIGINT");
-      await Promise.race([once(activeRecorder, "exit"), delay(5_000)]).catch(
-        () => undefined,
+    if (!activeRecorder) return;
+    try {
+      const compositeRelative = await stopAndComposeRecordingPair(
+        runDirectory,
+        activeRecorder,
       );
+      await checkpointStore.update((current) => ({
+        recordings: current.recordings.includes(compositeRelative)
+          ? current.recordings
+          : [...current.recordings, compositeRelative],
+      }));
+      await audit.append("recording.sealed", {
+        attempt: activeRecorder.metadata.attempt,
+        filename: compositeRelative,
+        gameSource: activeRecorder.metadata.game,
+        dashboardSource: activeRecorder.metadata.dashboard,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await audit.append("recording.seal.warning", {
+        attempt: activeRecorder.metadata.attempt,
+        message,
+      });
+      controller?.publishTranscript({ type: "runner.error", message: `Recording part could not be sealed: ${message}` });
     }
   };
 
   const startRecording = async (currentAttempt: number) => {
-    if (!prior.options.record || !virtualGameMirror || !virtualDashboard) {
+    if (!prior.options.record || !virtualGame || !virtualDashboard) {
       return;
     }
     const currentPart = String(currentAttempt).padStart(4, "0");
@@ -359,39 +422,38 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       "recordings",
       `challenge-part-${currentPart}.mkv`,
     );
-    const recordingPath = path.join(runDirectory, recordingRelative);
     const captureStartedAt = new Date().toISOString();
-    recorder = spawn(
-      "ffmpeg",
-      hiddenRecorderArguments({
-        gameDisplay: virtualGameMirror.display,
-        dashboardDisplay: virtualDashboard.display,
-        output: recordingPath,
-      }),
-      { stdio: ["ignore", "ignore", "pipe"] },
-    );
-    recorder.stderr?.on("data", (chunk: Buffer) => {
-      void audit.appendRaw(
-        `recorder-part-${currentPart}.log`,
-        chunk.toString("utf8"),
-      );
+    recorder = await startRecordingPair({
+      runDirectory,
+      attempt: currentAttempt,
+      game: virtualGame,
+      dashboard: virtualDashboard,
+      audit,
     });
-    await delay(1_000);
-    if (recorder.exitCode !== null) throw new Error("FFmpeg recorder exited early");
     await checkpointStore.update((current) => ({
-      recordings: current.recordings.includes(recordingRelative)
-        ? current.recordings
-        : [...current.recordings, recordingRelative],
+      recordingPairs: [
+        ...(current.recordingPairs ?? []).filter((pair) => pair.attempt !== currentAttempt),
+        recorder!.metadata,
+      ],
     }));
     await audit.append("recording.started", {
       attempt: currentAttempt,
-      backend: "gamescope-snapshot-mirror+xvfb-x11grab",
+      backend: "cage-wlr-screencopy+dashboard-x11grab",
       dimensions: "1920x1080",
       framesPerSecond: 30,
       timestampMode: "frame-count",
       captureStartedAt,
       filename: recordingRelative,
     });
+  };
+
+  const stopHoldingOverlay = async () => {
+    const overlay = holdingOverlay;
+    holdingOverlay = null;
+    if (!overlay || overlay.exitCode !== null) return;
+    signalProcessGroup(overlay, "SIGTERM");
+    await Promise.race([once(overlay, "exit"), delay(2_000)]).catch(() => undefined);
+    if (overlay.exitCode === null) signalProcessGroup(overlay, "SIGKILL");
   };
 
   const inspectDiagnostic = (text: string) => {
@@ -413,7 +475,10 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       if (accountPool.shouldStopForReserve(activeAccountId)) {
         reservePauseRequested = true;
         quotaExhausted = true;
-        exitDescription = "Stopped to preserve at least 50% of one account's five-hour allowance";
+        const account = accountPool.snapshot().accounts.find((entry) => entry.id === activeAccountId);
+        exitDescription = account
+          ? `Stopped at configured reserve for ${account.email} (${account.reserveFiveHourPercent}% five-hour, ${account.reserveWeeklyPercent}% weekly)`
+          : "Stopped at the configured account reserve";
         controller?.publishTranscript({
           type: "runner.account_reserve",
           message: exitDescription,
@@ -498,7 +563,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         "Steam is already running. Close it before a headless challenge so it cannot forward the game to the physical desktop.",
       );
     }
-    if (prior.options.isolateSaves) {
+    if (prior.options.isolateSaves && isParabox) {
       if (prior.savePrepared) await saveGuard.resume();
       else {
         await saveGuard.prepare();
@@ -510,12 +575,13 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     virtualGame = await startVirtualGame({
       rootDirectory,
       runtimeDirectory,
-      executable: paths.executable,
+      game: selectedGame,
     });
     const activeGame = new X11GameAdapter({
       display: virtualGame.display,
       frameDirectory,
       keypressCommand: virtualGame.keypressCommand,
+      titlePattern: gameTitlePattern(selectedGame),
       compositorScreenshot: virtualGame.compositorScreenshot,
     });
     game = activeGame;
@@ -524,9 +590,13 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       120_000,
       () => requestedStop !== null,
     );
+    await activeGame.waitForVisibleFrame(
+      120_000,
+      () => requestedStop !== null,
+    );
     await audit.append("game.ready", {
       ...gameWindow,
-      backend: "gamescope-headless",
+      backend: "cage-headless-xwayland",
       display: virtualGame.display,
     });
 
@@ -552,6 +622,12 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       ...(resumeFrame ? { initialFrame: resumeFrame } : {}),
       port: prior.options.port,
       webRoot: path.join(rootDirectory, "web"),
+      onGameAction: async (phase) => {
+        if (phase === "after") await stopHoldingOverlay();
+      },
+      onTranscript: async (record) => {
+        await audit.appendRaw("transcript.jsonl", JSON.stringify(record));
+      },
     });
     controller = activeController;
     const url = await activeController.listen();
@@ -587,11 +663,6 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     }
 
     if (prior.options.record) {
-      virtualGameMirror = await startVirtualGameMirror({
-        rootDirectory,
-        runtimeDirectory,
-        url,
-      });
       virtualDashboard = await startVirtualDashboard({
         rootDirectory,
         runtimeDirectory,
@@ -600,11 +671,16 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     }
 
     if (isColdResume) {
-      await startRecording(attempt);
-      await delay(2_000);
-      await activeGame.press(["ENTER"], { intervalMs: 0, settleMs: 1_800 });
+      if (resumeFrame) {
+        holdingOverlay = await startHoldingOverlay(
+          runtimeDirectory,
+          virtualGame.display,
+          resumeFrame,
+        );
+      }
       const restoredFrame = await activeGame.capture();
       activeController.publishFrame(restoredFrame);
+      await startRecording(attempt);
       state.resume(attempt);
       await audit.append("runtime.snapshot.restored", {
         attempt,
@@ -635,22 +711,26 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       threadId: prior.threadId,
       snapshot: state.snapshot(),
     });
-    const liveProgress = await readBestProgress(paths.saveDirectory);
+    const liveProgress = isParabox
+      ? await readBestProgress(paths.saveDirectory)
+      : null;
     if (liveProgress) state.ingestSave(liveProgress.text);
     if (state.snapshot().status !== "completed") {
-      savePoll = setInterval(() => {
-        void readBestProgress(paths.saveDirectory).then((progress) => {
-          if (!progress) return;
-          state.ingestSave(progress.text);
-        });
-      }, 350);
+      if (isParabox) {
+        savePoll = setInterval(() => {
+          void readBestProgress(paths.saveDirectory).then((progress) => {
+            if (!progress) return;
+            state.ingestSave(progress.text);
+          });
+        }, 350);
+      }
       checkpointPoll = setInterval(() => {
         if (checkpointBusy) return;
         checkpointBusy = true;
         checkpointWork.current = persistAttemptCheckpoint(
           checkpointStore,
           state,
-          prior.options.isolateSaves ? saveGuard : null,
+          prior.options.isolateSaves && isParabox ? saveGuard : null,
         )
           .catch((error: unknown) => {
             void audit.append("checkpoint.warning", String(error));
@@ -694,12 +774,13 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             activeController.publishTranscript({
               type: "runner.account_selected",
               account: accountLabel,
-              reserveFloor: "50% of one five-hour allowance",
+              reserveFiveHourPercent: choice.account.reserveFiveHourPercent,
+              reserveWeeklyPercent: choice.account.reserveWeeklyPercent,
             });
           } else {
             quotaExhausted = true;
             quotaResetAtMs = choice.retryAtMs;
-            exitDescription = "No account is currently eligible without violating the 50% reserve";
+            exitDescription = "No account is currently eligible under the configured reserve limits";
           }
         }
         if (!powerPauseRequested && (!accountPool || activeAccountId)) {
@@ -710,6 +791,10 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             arenaUrl: url,
             controlToken: activeController.controlToken,
             reasoningEffort: prior.options.reasoningEffort,
+            model: prior.options.model ?? "gpt-6-astra",
+            prompt: currentThreadId
+              ? RESUME_PROMPT
+              : initialPrompt(prior.options.goal ?? DEFAULT_GOAL, selectedGame.name),
             ...(currentThreadId ? { resumeThreadId: currentThreadId } : {}),
           });
           const codexStartedAtMs = Date.now();
@@ -840,7 +925,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         await persistAttemptCheckpoint(
           checkpointStore,
           state,
-          prior.options.isolateSaves ? saveGuard : null,
+          prior.options.isolateSaves && isParabox ? saveGuard : null,
         );
 
         if (requestedStop !== null) break;
@@ -1020,14 +1105,14 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     }
     if (codex?.exitCode === null) codex.kill("SIGINT");
     await stopRecording();
+    await stopHoldingOverlay();
     await game?.close().catch(() => undefined);
     await delay(500);
     browser?.kill("SIGTERM");
-    await virtualGameMirror?.close().catch(() => undefined);
     await virtualDashboard?.close().catch(() => undefined);
     await virtualGame?.close().catch(() => undefined);
     await controller?.close().catch(() => undefined);
-    if (prior.options.isolateSaves) {
+    if (prior.options.isolateSaves && isParabox) {
       await saveGuard.checkpointChallenge().catch(async (error: unknown) => {
         await audit.append("checkpoint.save.warning", String(error));
       });
@@ -1035,7 +1120,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     const snapshot = state.snapshot();
     const attemptStarted = snapshot.status !== "idle";
     const checkpointPhase =
-      outcomePhase === "completed" && prior.options.isolateSaves
+      outcomePhase === "completed" && prior.options.isolateSaves && isParabox
         ? "running"
         : outcomePhase;
     await checkpointStore.update({
@@ -1063,7 +1148,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       reason,
       snapshot,
     });
-    if (outcomePhase === "completed" && prior.options.isolateSaves) {
+    if (outcomePhase === "completed" && prior.options.isolateSaves && isParabox) {
       await saveGuard.restore();
       restored = true;
     }
@@ -1112,6 +1197,7 @@ export function codexArguments(options: {
   arenaUrl: string;
   controlToken: string;
   reasoningEffort: string;
+  model?: string;
   prompt?: string;
   resumeThreadId?: string;
 }): string[] {
@@ -1120,7 +1206,7 @@ export function codexArguments(options: {
     "exec",
     "--json",
     "--model",
-    "gpt-6-astra",
+    options.model ?? "gpt-6-astra",
     "--color",
     "never",
     "--sandbox",
@@ -1134,21 +1220,24 @@ export function codexArguments(options: {
     ...config("features.browser_use_external", "false"),
     ...config("features.in_app_browser", "false"),
     ...config("model_reasoning_effort", `"${options.reasoningEffort}"`),
-    ...config("mcp_servers.parabox.command", '"node"'),
-    ...config("mcp_servers.parabox.args", JSON.stringify([options.mcpEntry])),
+    ...config("mcp_servers.game.command", '"node"'),
+    ...config("mcp_servers.game.args", JSON.stringify([options.mcpEntry])),
     ...config(
-      "mcp_servers.parabox.env",
+      "mcp_servers.game.env",
       `{ARENA_URL=${JSON.stringify(options.arenaUrl)},ARENA_CONTROL_TOKEN=${JSON.stringify(options.controlToken)}}`,
     ),
-    ...config("mcp_servers.parabox.required", "true"),
-    ...config("mcp_servers.parabox.default_tools_approval_mode", '"approve"'),
+    ...config("mcp_servers.game.required", "true"),
+    ...config("mcp_servers.game.default_tools_approval_mode", '"approve"'),
     ...config(
-      "mcp_servers.parabox.enabled_tools",
+      "mcp_servers.game.enabled_tools",
       JSON.stringify([
-        "observe_game",
+        "observe_screen",
         "press_keys",
+        "type_text",
+        "mouse",
         "challenge_time",
         "challenge_tokens",
+        "complete_challenge",
       ]),
     ),
   ];
@@ -1159,7 +1248,39 @@ export function codexArguments(options: {
         options.resumeThreadId,
         options.prompt ?? RESUME_PROMPT,
       ]
-    : [...common, options.prompt ?? NEUTRAL_PROMPT];
+    : [...common, options.prompt ?? initialPrompt(DEFAULT_GOAL, "Patrick's Parabox")];
+}
+
+function initialPrompt(goal: string, gameName: string): string {
+  return [
+    `Goal: ${goal}`,
+    `You control ${gameName} through the game MCP tools. Observe only rendered pixels and interact only through the isolated keyboard and mouse tools.`,
+    "Do not search or browse the internet. Work autonomously and optimize for elapsed time and token use.",
+    "You decide whether the goal is complete. Call complete_challenge with a concise evidence summary only after visually verifying full completion; otherwise keep working.",
+  ].join("\n");
+}
+
+function normalizeGoal(value: string): string {
+  const goal = value.trim();
+  if (goal.length < 3 || goal.length > 4_000) {
+    throw new Error("Goal must contain 3 to 4000 characters");
+  }
+  return goal;
+}
+
+function normalizeModel(value: string): string {
+  const model = value.trim();
+  if (!/^[a-z0-9][a-z0-9._-]{1,80}$/i.test(model)) {
+    throw new Error("Invalid model name");
+  }
+  return model;
+}
+
+function gameTitlePattern(game: InstalledSteamGame): RegExp {
+  const terms = [game.name, path.basename(game.executable, path.extname(game.executable)), `steam_app_${game.appId}`]
+    .filter((value) => value.length >= 3)
+    .map((value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(terms.join("|"), "i");
 }
 
 function redactControlToken(args: string[]): string[] {
@@ -1351,6 +1472,30 @@ function retryDelayMs(attempt: number): number {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function startHoldingOverlay(
+  runtimeDirectory: string,
+  display: string,
+  frame: GameFrame,
+): Promise<ChildProcess> {
+  const framePath = path.join(runtimeDirectory, "holding-frame.jpg");
+  await writeFile(framePath, frame.data);
+  const environment: NodeJS.ProcessEnv = { ...process.env, DISPLAY: display };
+  delete environment.WAYLAND_DISPLAY;
+  delete environment.NIRI_SOCKET;
+  const overlay = spawn("ffplay", [
+    "-nostdin", "-hide_banner", "-loglevel", "error",
+    "-f", "image2", "-loop", "1",
+    "-x", "1280", "-y", "1080",
+    "-noborder", framePath,
+  ], {
+    env: environment,
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  await delay(250);
+  return overlay;
 }
 
 function signalProcessGroup(

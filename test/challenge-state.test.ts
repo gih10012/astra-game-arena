@@ -10,15 +10,18 @@ function save(total: number, completed: number): string {
   return `-section levels\n${rows.join("\n")}\n`;
 }
 
-test("uses monotonic time and completes only at the exact target catalog", () => {
+test("uses monotonic time and completes only after the agent declares success", () => {
   const state = new ChallengeState("gpt-6-astra", 3);
   state.start("run", 1_000, 5_000_000_000n);
   assert.equal(state.timeSnapshot(2_000, 5_250_000_000n).elapsedMs, 250);
   state.ingestSave(save(2, 2));
   assert.equal(state.snapshot().status, "running");
   state.ingestSave(save(3, 3));
-  assert.equal(state.snapshot().status, "completed");
+  assert.equal(state.snapshot().status, "running");
   assert.equal(state.snapshot().progress.completed, 3);
+  state.complete("All visible objectives are complete.");
+  assert.equal(state.snapshot().status, "completed");
+  assert.equal(state.snapshot().completion?.summary, "All visible objectives are complete.");
 });
 
 test("adds provider counters across turns without double-counting samples", () => {

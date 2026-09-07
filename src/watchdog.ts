@@ -15,6 +15,7 @@ import {
   readPowerState,
   shouldSnapshotForLowBattery,
 } from "./power.js";
+import { ControlPlane } from "./control-plane.js";
 
 const SERVICE_NAME = "astra-parabox-watchdog.service";
 const ASSEMBLY_SERVICE_NAME = "astra-parabox-assembler.service";
@@ -33,6 +34,8 @@ export async function runWatchdog(
     options.cliEntry ?? path.join(root, "dist/src/cli.js"),
   );
   let stopping = false;
+  const controlPlane = new ControlPlane(root, { port: 4317 });
+  const controlUrl = await controlPlane.listen();
   let child: ChildProcess | null = null;
   let wakePending: (() => void) | null = null;
   const wait = (milliseconds: number) =>
@@ -55,7 +58,8 @@ export async function runWatchdog(
   process.once("SIGTERM", stop);
 
   try {
-    console.log(`Astra Parabox watchdog ready: ${root}`);
+    console.log(`Astra Game Arena supervisor ready: ${root}`);
+    console.log(`Control plane: ${controlUrl}`);
     while (!stopping) {
       const runDirectory = await readActiveRun(root);
       if (!runDirectory) {
@@ -148,6 +152,7 @@ export async function runWatchdog(
     wake();
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
+    await controlPlane.close();
   }
 }
 
@@ -169,7 +174,7 @@ export async function installWatchdogService(
   const cliEntry = path.join(root, "dist/src/cli.js");
   await mkdir(serviceDirectory, { recursive: true });
   const unit = `[Unit]
-Description=Astra Parabox resumable challenge watchdog
+Description=Astra Game Arena supervisor and control plane
 After=default.target
 StartLimitIntervalSec=0
 
@@ -210,7 +215,7 @@ export async function installAssemblyService(
   const cliEntry = path.join(root, "dist/src/cli.js");
   await mkdir(serviceDirectory, { recursive: true });
   const unit = `[Unit]
-Description=Astra Parabox snapshot-boundary video assembler
+Description=Astra Game Arena video assembler
 After=default.target
 StartLimitIntervalSec=0
 

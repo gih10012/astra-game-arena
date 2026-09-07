@@ -7,7 +7,7 @@ import { ChallengeState } from "../src/challenge-state.js";
 import { ArenaController } from "../src/controller.js";
 import { MockGameAdapter } from "../src/game-adapter.js";
 
-test("exposes exactly the four challenge tools over MCP", async (context) => {
+test("exposes the private-screen computer-use and accounting tools over MCP", async (context) => {
   const state = new ChallengeState();
   const game = new MockGameAdapter();
   const controller = new ArenaController({ state, game, port: 0 });
@@ -31,16 +31,24 @@ test("exposes exactly the four challenge tools over MCP", async (context) => {
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["challenge_time", "challenge_tokens", "observe_game", "press_keys"],
+    [
+      "challenge_time",
+      "challenge_tokens",
+      "complete_challenge",
+      "mouse",
+      "observe_screen",
+      "press_keys",
+      "type_text",
+    ],
   );
   const time = await client.callTool({ name: "challenge_time", arguments: {} });
   assert.equal(time.isError, undefined);
-  const observe = await client.callTool({ name: "observe_game", arguments: {} });
+  const observe = await client.callTool({ name: "observe_screen", arguments: {} });
   assert.ok(Array.isArray(observe.content));
-  assert.equal(observe.content[0]?.type, "image");
+  assert.equal(observe.content[1]?.type, "image");
   await client.callTool({
     name: "press_keys",
-    arguments: { keys: ["UP", "RIGHT"], capture: false },
+    arguments: { keys: ["UP", "RIGHT"] },
   });
   assert.deepEqual(game.presses, [["UP", "RIGHT"]]);
 });

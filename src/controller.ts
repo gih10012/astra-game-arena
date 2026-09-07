@@ -20,9 +20,11 @@ interface ControllerOptions {
   port?: number;
   webRoot?: string;
   controlToken?: string;
+  onTranscript?: (record: TranscriptRecord) => void | Promise<void>;
+  onGameAction?: (phase: "before" | "after") => void | Promise<void>;
 }
 
-interface TranscriptRecord {
+export interface TranscriptRecord {
   sequence: number;
   at: string;
   event: unknown;
@@ -41,6 +43,9 @@ export class ArenaController {
   #frame: GameFrame | null = null;
   #transcriptSequence = 0;
   #actionEpoch = 0;
+  #onTranscript: ControllerOptions["onTranscript"];
+  #onGameAction: ControllerOptions["onGameAction"];
+  #transcriptWrites: Promise<void> = Promise.resolve();
 
   constructor(options: ControllerOptions) {
     this.state = options.state;
@@ -50,6 +55,8 @@ export class ArenaController {
     this.webRoot = options.webRoot ?? publicRoot;
     this.controlToken =
       options.controlToken ?? randomBytes(24).toString("base64url");
+    this.#onTranscript = options.onTranscript;
+    this.#onGameAction = options.onGameAction;
     this.#frame = options.initialFrame ?? null;
     this.state.on("change", (snapshot) => {
       this.broadcast("state", snapshot);
@@ -87,6 +94,7 @@ export class ArenaController {
   async close(): Promise<void> {
     for (const client of this.#clients) client.end();
     this.#clients.clear();
+    await this.#transcriptWrites;
     if (!this.#server) return;
     const server = this.#server;
     this.#server = null;
@@ -103,6 +111,12 @@ export class ArenaController {
     };
     this.transcript.push(record);
     if (this.transcript.length > 1_000) this.transcript.shift();
+    if (this.#onTranscript) {
+      this.#transcriptWrites = this.#transcriptWrites
+        .then(() => this.#onTranscript?.(record))
+        .then(() => undefined)
+        .catch(() => undefined);
+    }
     this.broadcast("transcript", record);
   }
 
@@ -188,23 +202,88 @@ export class ArenaController {
       const settleMs = boundedInteger(body.settleMs, 0, 2_000, 100);
       const capture = body.capture !== false;
       const actionEpoch = this.#actionEpoch;
-      if (capture) {
-        for (let index = 0; index < keys.length; index++) {
-          if (actionEpoch !== this.#actionEpoch) {
-            throw new Error("game action cancelled");
-          }
-          await this.game.press([keys[index]!], {
-            intervalMs: 0,
-            settleMs: index + 1 === keys.length ? settleMs : intervalMs,
-          });
-          this.publishFrame(await this.game.capture());
-        }
-      } else {
-        await this.game.press(keys, { intervalMs, settleMs });
-      }
+      await this.#onGameAction?.("before");
+      await this.game.press(keys, { intervalMs, settleMs });
+      if (actionEpoch !== this.#actionEpoch) throw new Error("game action cancelled");
+      if (capture) this.publishFrame(await this.game.capture());
+      await this.#onGameAction?.("after");
       json(response, 200, {
         pressed: keys.length,
         frame: this.#frame && capture ? serializeFrame(this.#frame) : null,
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/type") {
+      this.#authorize(request);
+      if (!this.game.typeText) throw new Error("Text input is unavailable");
+      const body = await readJson(request);
+      const text = String(body.text ?? "");
+      const intervalMs = boundedInteger(body.intervalMs, 0, 500, 25);
+      const settleMs = boundedInteger(body.settleMs, 0, 2_000, 100);
+      await this.#onGameAction?.("before");
+      await this.game.typeText(text, { intervalMs, settleMs });
+      const frame = await this.game.capture();
+      this.publishFrame(frame);
+      await this.#onGameAction?.("after");
+      json(response, 200, { typed: text.length, frame: serializeFrame(frame) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/pointer") {
+      this.#authorize(request);
+      const body = await readJson(request);
+      const action = String(body.action ?? "");
+      const x = boundedInteger(body.x, 0, 1_279, 0);
+      const y = boundedInteger(body.y, 0, 1_079, 0);
+      await this.#onGameAction?.("before");
+      if (action === "move") {
+        if (!this.game.movePointer) throw new Error("Pointer movement is unavailable");
+        await this.game.movePointer(x, y);
+      } else if (action === "click") {
+        if (!this.game.clickPointer) throw new Error("Pointer clicks are unavailable");
+        const button = parseButton(body.button);
+        const count = boundedInteger(body.count, 1, 3, 1);
+        await this.game.clickPointer(x, y, button, count);
+      } else if (action === "drag") {
+        if (!this.game.dragPointer) throw new Error("Pointer dragging is unavailable");
+        const toX = boundedInteger(body.toX, 0, 1_279, x);
+        const toY = boundedInteger(body.toY, 0, 1_079, y);
+        const durationMs = boundedInteger(body.durationMs, 0, 5_000, 500);
+        await this.game.dragPointer(x, y, toX, toY, durationMs);
+      } else if (action === "scroll") {
+        if (!this.game.scrollPointer) throw new Error("Pointer scrolling is unavailable");
+        const deltaX = boundedInteger(body.deltaX, -100, 100, 0);
+        const deltaY = boundedInteger(body.deltaY, -100, 100, 0);
+        await this.game.scrollPointer(x, y, deltaX, deltaY);
+      } else {
+        throw new Error("Unsupported pointer action");
+      }
+      const settleMs = boundedInteger(body.settleMs, 0, 2_000, 100);
+      if (settleMs > 0) await delay(settleMs);
+      const frame = await this.game.capture();
+      this.publishFrame(frame);
+      await this.#onGameAction?.("after");
+      json(response, 200, { action, frame: serializeFrame(frame) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/complete") {
+      this.#authorize(request);
+      const body = await readJson(request);
+      const summary = String(body.summary ?? "").trim();
+      if (summary.length < 3 || summary.length > 4_000) {
+        throw new Error("Completion summary must contain 3 to 4000 characters");
+      }
+      const frame = await this.game.capture();
+      this.publishFrame(frame);
+      this.state.complete(summary);
+      this.publishTranscript({
+        type: "challenge.completed",
+        message: summary,
+        frame: { sha256: frame.sha256, capturedAt: frame.capturedAt },
+      });
+      json(response, 200, {
+        completed: true,
+        summary,
+        frame: serializeFrame(frame),
       });
       return;
     }
@@ -214,8 +293,6 @@ export class ArenaController {
       "/index.html": { name: "index.html", type: "text/html; charset=utf-8" },
       "/app.js": { name: "app.js", type: "text/javascript; charset=utf-8" },
       "/styles.css": { name: "styles.css", type: "text/css; charset=utf-8" },
-      "/game.html": { name: "game.html", type: "text/html; charset=utf-8" },
-      "/game.js": { name: "game.js", type: "text/javascript; charset=utf-8" },
     };
     const file = staticFiles[url.pathname];
     if (request.method === "GET" && file) {
@@ -239,6 +316,18 @@ export class ArenaController {
       throw error;
     }
   }
+}
+
+function parseButton(value: unknown): "left" | "middle" | "right" {
+  const button = String(value ?? "left").toLowerCase();
+  if (button !== "left" && button !== "middle" && button !== "right") {
+    throw new Error("button must be left, middle, or right");
+  }
+  return button;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function serializeFrame(frame: GameFrame) {

@@ -87,7 +87,7 @@ test("serves a durable holding frame before the live game is restored", async (c
   assert.equal(await fetch(`${url}/api/frame`).then((response) => response.text()), "restored-live-frame");
 });
 
-test("cancels a long captured key sequence at the next key boundary", async (context) => {
+test("cancels a batched key sequence after the in-flight batch", async (context) => {
   const webRoot = await mkdtemp(path.join(os.tmpdir(), "arena-web-"));
   await Promise.all([
     writeFile(path.join(webRoot, "index.html"), "ok"),
@@ -130,5 +130,5 @@ test("cancels a long captured key sequence at the next key boundary", async (con
   releaseFirstPress();
 
   assert.equal((await request).status, 500);
-  assert.deepEqual(game.presses, [["UP"]]);
+  assert.deepEqual(game.presses, [["UP", "LEFT", "DOWN"]]);
 });

@@ -1,6 +1,6 @@
-# Astra × Parabox Benchmark
+# Astra Game Arena
 
-A reproducible, screen-only benchmark harness for testing whether GPT-6-Astra can complete all **364 official levels** of Patrick's Parabox from a clean save.
+A reproducible, screen-only arena for testing whether a Codex model can complete a natural-language goal in a locally installed Steam game. Patrick's Parabox (364 official levels) is the first fully verified adapter; other installed games use the same best-effort private desktop and input boundary.
 
 The model receives one neutral task sentence, rendered game frames, keyboard actions, and two self-inspection tools for elapsed time and token usage. It receives no walkthrough, level data, or save contents. Native web search and network browsers are disabled; normal Codex capabilities such as Shell, skills, plugins, memory, and sub-agents remain available.
 
@@ -8,24 +8,30 @@ The model receives one neutral task sentence, rendered game frames, keyboard act
 
 ## Why this architecture
 
-The native game window remains the sole source of truth. It runs on an isolated Gamescope headless display, where a local MCP bridge requests compositor screenshots and sends keyboard events. The latest lossless compositor view is mirrored into one private Xvfb display, while a separate Chrome instance renders the director dashboard in another. Neither window is mapped to the operator's physical desktop. The mirror avoids undefined X11 backing-buffer contents from Vulkan/Unity windows.
+The native game window remains the sole source of truth. It runs inside Cage's headless wlroots compositor and private Xwayland display. A local MCP bridge requests compositor screenshots and sends isolated mouse/keyboard events. A separate Chrome instance renders the director dashboard in another private Xvfb display. Neither window is mapped to the operator's physical desktop.
 
 ```text
-                    ┌─ observe_game / press_keys ─┐
-GPT-6-Astra (Codex) ┤                              ├─ Native game in Gamescope headless
+                    ┌─ observe_screen / computer-use ─┐
+Codex model (Codex) ┤                              ├─ Native game in Cage headless Xwayland
                     └─ challenge_time / tokens ───┤
                                                   │
 Codex JSONL + rollout usage ── Arena controller ──┼─ Director dashboard
 Game save (referee only) ─────────────────────────┘
                                                   │
-Gamescope compositor → private game mirror + dashboard Xvfb ── FFmpeg → parts
+Cage screencopy + dashboard Xvfb ── FFmpeg → continuous CFR parts
 ```
 
-The browser is deliberately not the control plane. This avoids a lossy browser reimplementation of the game, cuts latency, and lets viewers see the unmodified native game beside an exact, read-only Codex transcript. The loopback dashboard URL remains available for an operator to open manually, but no physical browser is opened by default.
+The browser is a read-only control/monitoring plane, never a game reimplementation. It lets the operator configure a run and view the unmodified native game beside an exact Codex transcript. It is always served on loopback by the watchdog; no physical browser is opened by default.
 
 ## Formal layout sample
 
-[Download the 6-second 1920×1080 sample](https://github.com/gih10012/astra-parabox-benchmark/releases/download/headless-sample-v0.2.0/astra-parabox-formal-sample.mp4). Both panes were rendered and captured on private virtual displays. The left pane is the real Steam game; the right pane is a director-dashboard rehearsal. This is a production/layout sample, not a claimed benchmark result, and it uses no model tokens.
+Generate a fresh six-second 1920×1080 sample from the installed game without using model tokens:
+
+```bash
+node dist/src/cli.js smoke-headless
+```
+
+The command writes a playable `recordings/challenge-part-0001.mkv` under `.arena/`, with the native game on the left and the compact director dashboard on the right. It also verifies 30 FPS, changing native pixels, and save restoration.
 
 ## Requirements
 
@@ -34,13 +40,13 @@ The current implementation targets Linux with:
 - Node.js 22+
 - Codex CLI with `gpt-6-astra`
 - Patrick's Parabox (Steam app `1260520`)
-- Gamescope with its headless backend and Xwayland
-- Xvfb, `xprop`, FFmpeg, Steam, Google Chrome, a C compiler, and X11/XTest headers
+- Cage with its headless wlroots backend and Xwayland
+- Xvfb, `xprop`, `wlr-randr`, `grim`, FFmpeg, Steam, Google Chrome, a C compiler, and X11/XTest headers
 
 On Arch Linux the additional runtime packages are:
 
 ```bash
-sudo pacman -S gamescope xorg-server-xvfb xorg-xprop libxtst
+sudo pacman -S cage xorg-server-xvfb xorg-xprop grim wf-recorder libxtst
 ```
 
 Install and verify:
@@ -53,9 +59,9 @@ npm run doctor
 
 By default, the harness uses `~/.codex-official` when that directory contains `auth.json`, then falls back to the normal Codex home. Override it with `--codex-home PATH` or `ASTRA_CODEX_HOME`. Credentials are never copied into run artifacts.
 
-If two or more separately authenticated homes exist under `~/.codex-parabox-accounts/<label>/auth.json`, the runner enables its resumable account pool. The same Codex thread is synchronized through `codex-proxy` when accounts rotate. It prefers an account whose five-hour window most recently reset, proactively snapshots and switches when a newer reset arrives, immediately rotates away from an exhausted account, and stops at the next snapshot boundary whenever continuing would leave every account with less than 50% of its five-hour allowance. `runs/<run-id>/account-pool.json` records only scheduling telemetry; authentication files remain outside the repository. Multi-account use is disclosed in the audit trail.
+If two or more separately authenticated homes exist under `~/.codex-parabox-accounts/<label>/auth.json`, the runner enables its resumable account pool. The same Codex thread is synchronized through `codex-proxy` when accounts rotate. The control page lets you enable accounts and set independent five-hour and weekly reserve percentages. The scheduler prefers a recently reset account, proactively snapshots before switching, and waits when every enabled account is below its configured reserve. `runs/<run-id>/account-pool.json` records only scheduling telemetry; authentication files remain outside the repository. Multi-account use is disclosed in the audit trail.
 
-Validate authentication and the four benchmark-specific MCP tools with a small, non-challenge GPT-6-Astra turn before touching saves:
+Validate authentication and the arena MCP tools with a small, non-challenge turn before touching saves:
 
 ```bash
 node dist/src/cli.js smoke-model
@@ -88,7 +94,7 @@ Install the per-user watchdog once before the first long run. `run` then
 durably queues the challenge with that watchdog and returns. Once it prints
 `You may close this terminal now`, closing the terminal is safe. The watchdog
 owns the first attempt as well as every quota or reboot resume. The dashboard
-becomes available at `http://127.0.0.1:4317` after the hidden game starts;
+is available continuously at `http://127.0.0.1:4317` as soon as the watchdog is installed;
 follow startup and resume logs with:
 
 ```bash
@@ -106,8 +112,8 @@ Defaults:
 - model: `gpt-6-astra`
 - launcher: `codex-proxy` (local port 7890 proxy and official auth profile)
 - reasoning effort: `high`
-- completion: exactly `364/364`
-- prompt: `Complete all 364 official levels in Patrick's Parabox. Use the Parabox tools for game observation and control. Do not search or browse the internet.`
+- completion: agent-declared success for the configured goal (Parabox referee reports `364/364`)
+- prompt: generated from the configured natural-language goal and isolated computer-use tools
 - recording: 1920×1080, 30 FPS Matroska parts from private displays
 - UI: native game at 1280×1080, director dashboard at 640×1080
 - physical desktop windows: none by default; `--browser` opens only the monitoring dashboard
@@ -115,7 +121,7 @@ Defaults:
 - Shell: enabled in an empty writable workspace, with outbound network disabled
 - skills, plugins, apps, memory, and sub-agents: retained from the selected Codex home
 - quota retry: reported reset time + 1 minute; 5-hour fallback
-- multi-account reserve: keep at least one five-hour allowance 50% available; newly reset account first
+- multi-account reserve: configurable per account in the control page; newly reset account first
 - low-battery pause: 3% while discharging; resume on safe battery or external power
 - crash checkpoint: cumulative time/tokens, provider token cursor, thread ID, progress, and game save every 5 seconds
 
@@ -156,7 +162,7 @@ The loopback director server exposes:
 - `GET /api/challenge` — dashboard snapshot, including referee-only visible progress
 - `GET /api/events` — Server-Sent Events for state and transcript updates
 
-Codex receives matching MCP tools named `challenge_time` and `challenge_tokens`, plus `observe_game` and `press_keys`. The progress counter is intentionally not returned to Codex because it is derived from the save file rather than pixels.
+Codex receives matching MCP tools named `challenge_time` and `challenge_tokens`, plus `observe_screen`, `press_keys`, `type_text`, `mouse`, and `complete_challenge`. Referee progress is viewer-only and is not returned to the model.
 
 The runner follows the documented `codex exec --json` stream and the local rollout's incremental token events. See the [Codex non-interactive mode documentation](https://learn.chatgpt.com/docs/non-interactive-mode) and [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 

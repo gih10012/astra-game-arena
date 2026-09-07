@@ -12,7 +12,7 @@
 
 ## During the take
 
-The runner opens the native game inside Gamescope's headless backend. Gamescope compositor screenshots feed a game-only mirror in private Xvfb, and the compact director dashboard occupies a second private Xvfb display. FFmpeg combines only those two displays. It opens nothing on niri or any other physical compositor by default. The controller logs a loopback dashboard URL that the operator may open manually; `--browser` is the explicit opt-in to open it automatically. Do not interact after the timer starts. Infrastructure recovery is allowed only through the recorded watchdog path; human gameplay makes the run invalid.
+The runner opens the selected native game inside Cage's private headless Xwayland. `wf-recorder` continuously captures the native game output, and FFmpeg combines it with the compact director dashboard from a second private Xvfb display. It opens nothing on niri or any other physical compositor by default. The controller logs a loopback dashboard URL; `--browser` is the explicit opt-in to open it automatically. Do not interact after the timer starts. Infrastructure recovery is allowed only through the recorded watchdog path; human gameplay makes the run invalid.
 
 The initial recording starts on the real title page before any Enter key is sent. Later quota/power parts resume the retained process directly. After a cold reboot, a holding copy of the last compositor snapshot is recorded while the relaunched game restores its save behind the mirror; the mirror switches to live pixels only after the hidden title page has been dismissed. The persisted Codex `thread_id`, cumulative timer, and token counters resume with that same boundary, so a title page is never introduced into a later part.
 

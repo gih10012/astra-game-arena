@@ -2,10 +2,8 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ChallengeState } from "./challenge-state.js";
-import { ArenaController } from "./controller.js";
+import { ControlPlane } from "./control-plane.js";
 import { runDoctor } from "./doctor.js";
-import { MockGameAdapter } from "./game-adapter.js";
 import { runHeadlessSmoke } from "./headless-smoke.js";
 import { runModelSmoke } from "./model-smoke.js";
 import { CheckpointStore, readActiveRun } from "./run-checkpoint.js";
@@ -21,7 +19,6 @@ import {
   runChallenge,
   type RunOptions,
 } from "./runner.js";
-import { TARGET_LEVELS } from "./types.js";
 import {
   installAssemblyService,
   installWatchdogService,
@@ -51,63 +48,11 @@ if (command === "doctor") {
   }
   if (checks.some((check) => check.required && !check.ok)) process.exitCode = 1;
 } else if (command === "demo") {
-  const port = numberArg(args, "--port", 4317);
+  const port = numberArg(args, "--port", 4320);
   const duration = numberArg(args, "--duration", 0);
-  const state = new ChallengeState("gpt-6-astra", TARGET_LEVELS);
-  const demoControlToken = process.env.ARENA_DEMO_CONTROL_TOKEN;
-  const controller = new ArenaController({
-    state,
-    game: new MockGameAdapter(),
-    port,
-    webRoot: path.join(rootDirectory, "web"),
-    ...(demoControlToken ? { controlToken: demoControlToken } : {}),
-  });
-  const url = await controller.listen();
-  state.start("demo-00000000");
-  state.ingestSave(mockSave(TARGET_LEVELS, 87));
-  state.ingestCodexEvent({
-    type: "event_msg",
-    payload: {
-      type: "token_count",
-      info: {
-        total_token_usage: {
-          input_tokens: 12840,
-          cached_input_tokens: 8192,
-          output_tokens: 756,
-          reasoning_output_tokens: 410,
-          total_tokens: 13596,
-        },
-      },
-    },
-  });
-  controller.publishTranscript({
-    type: "turn.started",
-  });
-  controller.publishTranscript({
-    type: "item.completed",
-    item: {
-      type: "reasoning",
-      text: "Inspecting the recursive box structure and planning the next sequence.",
-    },
-  });
-  controller.publishTranscript({
-    type: "item.completed",
-    item: {
-      type: "mcp_tool_call",
-      server: "parabox",
-      tool: "observe_game",
-      arguments: {},
-    },
-  });
-  await fetch(new URL("/internal/observe", url), {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${controller.controlToken}`,
-      "Content-Type": "application/json",
-    },
-    body: "{}",
-  });
-  console.log(`Director dashboard: ${url}`);
+  const controlPlane = new ControlPlane(rootDirectory, { port });
+  const url = await controlPlane.listen();
+  console.log(`Arena control page: ${url}`);
   if (args.includes("--browser")) {
     spawn("google-chrome-stable", [`--app=${url}`], {
       detached: true,
@@ -116,13 +61,13 @@ if (command === "doctor") {
   }
   if (duration > 0) {
     await new Promise((resolve) => setTimeout(resolve, duration * 1_000));
-    await controller.close();
+    await controlPlane.close();
   } else {
     await new Promise<void>((resolve) => {
       process.once("SIGINT", resolve);
       process.once("SIGTERM", resolve);
     });
-    await controller.close();
+    await controlPlane.close();
   }
 } else if (command === "run") {
   const outputIndex = args.indexOf("--output");
@@ -132,16 +77,21 @@ if (command === "doctor") {
     | "medium"
     | "high"
     | "xhigh"
-    | "max";
-  if (!["low", "medium", "high", "xhigh", "max"].includes(reasoning)) {
-    throw new Error("--reasoning must be low, medium, high, xhigh, or max");
+    | "max"
+    | "ultra";
+  if (!["low", "medium", "high", "xhigh", "max", "ultra"].includes(reasoning)) {
+    throw new Error("--reasoning must be low, medium, high, xhigh, max, or ultra");
   }
   const requestedCodexHome = optionalPathArg(args, "--codex-home");
   const quotaWaitHours = numberArg(args, "--quota-wait-hours", 5);
   if (quotaWaitHours <= 0) throw new Error("--quota-wait-hours must be positive");
   const runOptions: RunOptions = {
     rootDirectory,
-    port: numberArg(args, "--port", 4317),
+    publicPort: numberArg(args, "--port", 4317),
+    port: numberArg(args, "--internal-port", 4318),
+    model: stringArg(args, "--model", "gpt-6-astra"),
+    gameAppId: stringArg(args, "--game", "1260520"),
+    goal: stringArg(args, "--goal", "Complete all official levels in Patrick's Parabox."),
     reasoningEffort: reasoning,
     record: !args.includes("--no-record"),
     openDashboard: args.includes("--browser"),
@@ -164,7 +114,7 @@ if (command === "doctor") {
     const outcome = await queueChallenge(runOptions);
     console.log(`Challenge queued under ${service.service}.`);
     console.log(`Run artifacts: ${outcome.runDirectory}`);
-    console.log(`Director dashboard (once ready): http://127.0.0.1:${runOptions.port}`);
+    console.log(`Control and monitoring: http://127.0.0.1:${runOptions.publicPort}`);
     console.log("Status: node dist/src/cli.js status");
     console.log(
       `Logs: journalctl --user -u ${service.service} -f`,
@@ -173,11 +123,11 @@ if (command === "doctor") {
   }
 } else if (command === "resume") {
   const runDirectory = args.find((argument) => !argument.startsWith("--"));
-  if (!runDirectory) throw new Error("Usage: parabox-arena resume <run-directory>");
+  if (!runDirectory) throw new Error("Usage: game-arena resume <run-directory>");
   printOutcome(await resumeChallenge(path.resolve(runDirectory)));
 } else if (command === "cancel") {
   const runDirectory = args.find((argument) => !argument.startsWith("--"));
-  if (!runDirectory) throw new Error("Usage: parabox-arena cancel <run-directory>");
+  if (!runDirectory) throw new Error("Usage: game-arena cancel <run-directory>");
   printOutcome(await cancelChallenge(path.resolve(runDirectory)));
 } else if (command === "daemon") {
   await runWatchdog(rootDirectory, {
@@ -203,7 +153,7 @@ if (command === "doctor") {
     console.log(JSON.stringify(await watchdogServiceStatus(), null, 2));
   } else {
     throw new Error(
-      "Usage: parabox-arena service install|install-assembler|status|uninstall",
+      "Usage: game-arena service install|install-assembler|status|uninstall",
     );
   }
 } else if (command === "status") {
@@ -223,7 +173,7 @@ if (command === "doctor") {
     ? path.resolve(positional)
     : await readActiveRun(rootDirectory);
   if (!runDirectory) {
-    throw new Error("Usage: parabox-arena assemble [run-directory] [--output PATH]");
+    throw new Error("Usage: game-arena assemble [run-directory] [--output PATH]");
   }
   const requestedOutput = optionalPathArg(args, "--output");
   console.log(
@@ -244,26 +194,26 @@ if (command === "doctor") {
   console.log(JSON.stringify(await runHeadlessSmoke(rootDirectory), null, 2));
 } else if (command === "restore") {
   const recovery = args[0];
-  if (!recovery) throw new Error("Usage: parabox-arena restore <save-recovery.json>");
+  if (!recovery) throw new Error("Usage: game-arena restore <save-recovery.json>");
   await restoreFromRecovery(path.resolve(recovery));
   console.log("Save files restored.");
 } else {
-  console.log(`Astra × Parabox Arena
+  console.log(`Astra Game Arena
 
 Usage:
-  parabox-arena doctor [--json] [--codex-home PATH]
-  parabox-arena demo [--port 4317] [--duration SECONDS] [--browser]
-  parabox-arena smoke-model [--codex-home PATH]
-  parabox-arena smoke-headless
-  parabox-arena run [--reasoning high] [--quota-wait-hours 5] [--codex-home PATH] [--no-record] [--browser] [--keep-saves] [--foreground]
-  parabox-arena resume <run-directory>
-  parabox-arena cancel <run-directory>
-  parabox-arena status
-  parabox-arena assemble [run-directory] [--output PATH]
-  parabox-arena daemon [--poll-seconds 1]
-  parabox-arena assembly-daemon [--poll-seconds 10]
-  parabox-arena service install|install-assembler|status|uninstall
-  parabox-arena restore <run/save-recovery.json>
+  game-arena doctor [--json] [--codex-home PATH]
+  game-arena demo [--port 4320] [--duration SECONDS] [--browser]
+  game-arena smoke-model [--codex-home PATH]
+  game-arena smoke-headless
+  game-arena run [--game APPID] [--goal TEXT] [--model MODEL] [--reasoning high] [--quota-wait-hours 5] [--codex-home PATH] [--no-record] [--foreground]
+  game-arena resume <run-directory>
+  game-arena cancel <run-directory>
+  game-arena status
+  game-arena assemble [run-directory] [--output PATH]
+  game-arena daemon [--poll-seconds 1]
+  game-arena assembly-daemon [--poll-seconds 10]
+  game-arena service install|install-assembler|status|uninstall
+  game-arena restore <run/save-recovery.json>
 `);
 }
 
@@ -298,11 +248,4 @@ function printOutcome(outcome: {
   console.log(`Run phase: ${outcome.phase}`);
   if (outcome.retryAt) console.log(`Automatic retry: ${outcome.retryAt}`);
   if (outcome.reason) console.log(`Reason: ${outcome.reason}`);
-}
-
-function mockSave(total: number, completed: number): string {
-  const lines = Array.from({ length: total }, (_, index) =>
-    `level_${index} ${index < completed ? 1 : 0} ${index < completed ? 1 : 0}`,
-  );
-  return `version 6\n-section levels\n${lines.join("\n")}\n`;
 }

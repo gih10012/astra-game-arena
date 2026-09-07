@@ -16,6 +16,8 @@ import {
 export class ChallengeState extends EventEmitter {
   readonly model: string;
   readonly targetLevels: number;
+  readonly goal: string;
+  readonly game: { appId: string; name: string } | null;
   attempt: number;
   #runId: string | null = null;
   #status: ChallengeStatus = "idle";
@@ -29,12 +31,21 @@ export class ChallengeState extends EventEmitter {
   #tokenSource: TokenSnapshot["source"] = "none";
   #progress: LevelProgress = { total: 0, unlocked: 0, completed: 0 };
   #failure: string | null = null;
+  #completion: { summary: string; declaredAt: string } | null = null;
 
-  constructor(model = "gpt-6-astra", targetLevels = TARGET_LEVELS, attempt = 1) {
+  constructor(
+    model = "gpt-6-astra",
+    targetLevels = TARGET_LEVELS,
+    attempt = 1,
+    goal = "",
+    game: { appId: string; name: string } | null = null,
+  ) {
     super();
     this.model = model;
     this.targetLevels = targetLevels;
     this.attempt = attempt;
+    this.goal = goal;
+    this.game = game;
   }
 
   start(
@@ -86,15 +97,7 @@ export class ChallengeState extends EventEmitter {
 
   ingestSave(text: string): LevelProgress {
     this.#progress = parseParaboxSave(text);
-    if (
-      this.#status === "running" &&
-      this.#progress.total === this.targetLevels &&
-      this.#progress.completed === this.targetLevels
-    ) {
-      this.finish("completed");
-    } else {
-      this.emit("change", this.snapshot());
-    }
+    this.emit("change", this.snapshot());
     return this.#progress;
   }
 
@@ -113,6 +116,17 @@ export class ChallengeState extends EventEmitter {
 
   stop(): void {
     this.finish("stopped");
+  }
+
+  complete(summary: string): void {
+    const normalized = summary.trim();
+    if (!normalized) throw new Error("Completion summary is required");
+    if (this.#status !== "running") throw new Error("Challenge is not running");
+    this.#completion = {
+      summary: normalized,
+      declaredAt: new Date().toISOString(),
+    };
+    this.finish("completed");
   }
 
   pause(
@@ -192,6 +206,8 @@ export class ChallengeState extends EventEmitter {
     return {
       runId: this.#runId,
       model: this.model,
+      goal: this.goal,
+      game: this.game ? { ...this.game } : null,
       attempt: this.attempt,
       status: this.#status,
       targetLevels: this.targetLevels,
@@ -199,6 +215,7 @@ export class ChallengeState extends EventEmitter {
       time: this.timeSnapshot(),
       tokens: this.tokenSnapshot(),
       failure: this.#failure,
+      completion: this.#completion ? { ...this.#completion } : null,
     };
   }
 }

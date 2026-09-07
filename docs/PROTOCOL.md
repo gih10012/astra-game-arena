@@ -1,29 +1,30 @@
 # Benchmark protocol
 
-## Fixed challenge definition
+## Challenge definition
 
 - Start from no Patrick's Parabox save slots and finish when a runtime-only referee observes exactly 364 completed entries out of 364 official entries.
-- Give GPT-6-Astra the initial message: `Complete all 364 official levels in Patrick's Parabox. Use the Parabox tools for game observation and control. Do not search or browse the internet.`
+- Give the selected Codex model the configured natural-language goal and generic computer-use tools. The Parabox default goal is `Complete all official levels in Patrick's Parabox.`
 - After an infrastructure or quota interruption, resume the same Codex thread with: `Continue the same task from the current game state. Do not search or browse the internet.` Each such continuation is recorded and makes the result a `resumed` run.
 - Use `high` reasoning effort by default. A different effort makes a distinct benchmark run and must be shown in its metadata.
 - Completion is the hard requirement. Wall-clock time and token use are reported as separate metrics; they are not combined into a score.
 
 ## Model-visible surface
 
-The harness adds four benchmark-specific MCP tools:
+The harness adds generic benchmark MCP tools:
 
-1. `observe_game()` returns a current JPEG screenshot of the native game window.
-2. `press_keys(keys, intervalMs, settleMs, capture)` focuses the game, types a bounded sequence of allowed keyboard keys, and normally returns the resulting frame.
+1. `observe_screen()` returns a current JPEG screenshot of the native private desktop.
+2. `press_keys(...)` and `type_text(...)` send bounded keyboard input; `mouse(...)` sends private pointer input.
 3. `challenge_time()` returns the official elapsed time snapshot.
 4. `challenge_tokens()` returns the latest cumulative token snapshot.
+5. `complete_challenge(...)` records the agent's completion declaration.
 
 The game adapter never reads process memory, game assets, level definitions, save files, OCR, accessibility trees, or symbolic state for the model. The referee reads the save only to determine progress and completion, and does not expose that value through MCP.
 
 The selected Codex home and its normal configuration remain active. Shell, local tools, apps, plugins, skills, memories, hooks, and multi-agent tools are not disabled by the harness. The shell starts in an empty `workspace-write` directory with outbound network disabled.
 
-Native web search and all Codex browser surfaces are disabled through command-line configuration. Using Shell, an app, a plugin, another MCP server, memory, or a sub-agent to retrieve external puzzle information invalidates the run. Such tool activity remains in the raw Codex event log for audit. The `parabox` MCP server itself exposes only the four tools above.
+Native web search and all Codex browser surfaces are disabled through command-line configuration. Using Shell, an app, a plugin, another MCP server, memory, or a sub-agent to retrieve external puzzle information invalidates the run. Such tool activity remains in the raw Codex event log for audit. The arena MCP server exposes only the computer-use, accounting, and explicit completion tools above.
 
-The four `parabox` tools are pre-approved so an unattended run never blocks on a confirmation dialog. Other tool approvals continue to follow the selected Codex configuration and the non-interactive approval policy.
+The arena tools are pre-approved so an unattended run never blocks on a confirmation dialog. Other tool approvals continue to follow the selected Codex configuration and the non-interactive approval policy.
 
 ## Checkpoints and recovery
 
@@ -31,7 +32,7 @@ The four `parabox` tools are pre-approved so an unattended run never blocks on a
 - `checkpoint.json` and the latest challenge save are atomically replaced and synced every five seconds while the model is active.
 - The checkpoint includes the Codex thread ID, attempt number, cumulative active time, cumulative token totals, the last provider token cursor, referee progress, retry time, and recording-part list. It never contains the arena control token or Codex credentials.
 - Quota and rate-limit errors enter `waiting_quota`. The retry uses Codex's machine-readable `resets_at` for the exhausted 5-hour or weekly window, plus a one-minute margin. If multiple windows are exhausted, it uses the later reset. Five hours is the fallback only when no valid future timestamp is available.
-- When multiple explicitly authenticated account homes are configured, the audit records each account-label selection. The scheduler prefers the account whose five-hour window most recently reset, proactively snapshots and rotates when a newer reset becomes eligible, and rotates immediately after quota exhaustion. It never intentionally consumes beyond the point where all configured accounts would have less than 50% of a five-hour window remaining; if necessary, it snapshots and waits for the earliest reset. Token totals remain cumulative across the single resumed challenge thread.
+- When multiple explicitly authenticated account homes are configured, the audit records each account-label selection. The scheduler prefers the account whose five-hour window most recently reset, proactively snapshots and rotates when a newer reset becomes eligible, and rotates immediately after quota exhaustion. It never intentionally consumes beyond each account's configured five-hour/weekly reserve; if necessary, it snapshots and waits for the next eligible reset. Token totals remain cumulative across the single resumed challenge thread.
 - A quota retry retains the live hidden game and controller. Recording and active timing stop at the boundary; the next part resumes the same process after the absolute reset deadline. If the computer was suspended past that deadline, the next wake poll continues immediately.
 - At 3% battery or lower while discharging, the runner enters `waiting_power`, checkpoints the game save and a compositor frame, and stops active timing/recording. Connecting external power or recovering above 3% resumes the retained process. Boot recovery observes the same gate before launching.
 - A stale `running` checkpoint after process death or reboot becomes immediately eligible for watchdog recovery once the user's runtime directory is available. A physical compositor is not required.

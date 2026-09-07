@@ -27,12 +27,15 @@ test("discovers isolated ChatGPT account homes without exposing tokens", async (
   ]);
 });
 
-test("rotates accounts while preserving half of one five-hour window", async () => {
+test("rotates accounts at configurable per-account reserve thresholds", async () => {
   const run = await mkdtemp(path.join(os.tmpdir(), "parabox-pool-"));
   const now = new Date("2026-09-07T01:00:00Z").getTime();
   const pool = await AccountPool.open(run, [
     profile("a", "a@example.test", "/accounts/a"),
     profile("b", "b@example.test", "/accounts/b"),
+  ], [
+    { accountId: "a", enabled: true, reserveFiveHourPercent: 50, reserveWeeklyPercent: 10 },
+    { accountId: "b", enabled: true, reserveFiveHourPercent: 0, reserveWeeklyPercent: 0 },
   ]);
   assert.equal(pool.choose(now).account?.id, "a");
   await pool.update("a", {
@@ -47,7 +50,7 @@ test("rotates accounts while preserving half of one five-hour window", async () 
   });
   assert.equal(pool.shouldStopForReserve("b", now), false);
   assert.equal(pool.choose(now).account?.id, "b");
-  assert.match(await readFile(path.join(run, "account-pool.json"), "utf8"), /"reserveUsedPercent": 50/);
+  assert.match(await readFile(path.join(run, "account-pool.json"), "utf8"), /"reserveFiveHourPercent": 50/);
 });
 
 test("prefers the account whose allowance most recently reset", async () => {
@@ -56,6 +59,9 @@ test("prefers the account whose allowance most recently reset", async () => {
   const pool = await AccountPool.open(run, [
     profile("a", "a@example.test", "/accounts/a"),
     profile("b", "b@example.test", "/accounts/b"),
+  ], [
+    { accountId: "a", enabled: true, reserveFiveHourPercent: 50, reserveWeeklyPercent: 0 },
+    { accountId: "b", enabled: true, reserveFiveHourPercent: 0, reserveWeeklyPercent: 0 },
   ]);
   await pool.update("a", {
     primary: { usedPercent: 60, resetsAtMs: now + 3_600_000 },
@@ -84,4 +90,24 @@ test("returns the earliest account reset when every account is blocked", async (
     retryAtMs: now + 10_000,
   });
   assert.equal(pool.choose(now + 10_001).account?.id, "a");
+});
+
+test("waits for the later reset when both reserve windows block an account", async () => {
+  const run = await mkdtemp(path.join(os.tmpdir(), "arena-pool-windows-"));
+  const now = Date.parse("2026-09-07T03:00:00Z");
+  const pool = await AccountPool.open(run, [
+    profile("a", "a@example.test", "/accounts/a"),
+  ], [{
+    accountId: "a", enabled: true,
+    reserveFiveHourPercent: 20, reserveWeeklyPercent: 20,
+  }]);
+  await pool.update("a", {
+    primary: { usedPercent: 85, resetsAtMs: now + 3_600_000 },
+    secondary: { usedPercent: 90, resetsAtMs: now + 86_400_000 },
+  });
+  assert.deepEqual(pool.choose(now), {
+    account: null,
+    limitedByReserve: true,
+    retryAtMs: now + 86_400_000,
+  });
 });
