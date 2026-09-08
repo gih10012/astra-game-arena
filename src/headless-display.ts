@@ -7,8 +7,40 @@ import { runCommand } from "./command.js";
 import type { InstalledSteamGame } from "./steam-catalog.js";
 
 const GAME_WIDTH = 1920;
-const VIDEO_HEIGHT = 1080;
-const DASHBOARD_WIDTH = 640;
+export const DIRECTOR_WIDTH = 1920;
+export const DIRECTOR_HEIGHT = 1080;
+
+/**
+ * Pixel-exact location of `.game-stage` in the 1920x1080 director viewport.
+ * The matching geometry lives in `web/styles.css` under `body.director`.
+ */
+export const DIRECTOR_GAME_RECT = Object.freeze({
+  x: 20,
+  y: 200,
+  width: 1248,
+  height: 810,
+});
+
+export function directorCompositionFilter(
+  outputPixelFormat: "yuv420p" | "yuyv422",
+  fps = 30,
+): string {
+  const rect = DIRECTOR_GAME_RECT;
+  return (
+    `[0:v]fps=${fps},` +
+      `scale=${rect.width}:${rect.height}:force_original_aspect_ratio=decrease:` +
+      `force_divisible_by=2:flags=lanczos,` +
+      `pad=${rect.width}:${rect.height}:(ow-iw)/2:(oh-ih)/2:color=black,` +
+      `setsar=1,setpts=N/(${fps}*TB)[g];` +
+    `[1:v]fps=${fps},` +
+      `scale=${DIRECTOR_WIDTH}:${DIRECTOR_HEIGHT}:force_original_aspect_ratio=decrease:` +
+      `force_divisible_by=2:flags=lanczos,` +
+      `pad=${DIRECTOR_WIDTH}:${DIRECTOR_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,` +
+      `setsar=1,setpts=N/(${fps}*TB)[d];` +
+    `[d][g]overlay=${rect.x}:${rect.y}:shortest=1:eof_action=endall,` +
+      `fps=${fps},setpts=N/(${fps}*TB),format=${outputPixelFormat}[v]`
+  );
+}
 
 export interface VirtualGameRuntime {
   display: string;
@@ -228,7 +260,7 @@ export async function startVirtualGame(options: {
           "-applaunch", options.game.appId,
           "-screen-fullscreen", "0",
           "-screen-width", String(GAME_WIDTH),
-          "-screen-height", String(VIDEO_HEIGHT),
+          "-screen-height", String(DIRECTOR_HEIGHT),
         ], {
           env: steamEnvironment,
           detached: true,
@@ -247,7 +279,7 @@ export async function startVirtualGame(options: {
           "run", options.game.executable,
           "-screen-fullscreen", "0",
           "-screen-width", String(GAME_WIDTH),
-          "-screen-height", String(VIDEO_HEIGHT),
+          "-screen-height", String(DIRECTOR_HEIGHT),
         ] : [],
         {
           env: gameEnvironment,
@@ -348,7 +380,7 @@ export async function startVirtualDashboard(options: {
   const display = await freeXDisplay(90, 129);
   const xvfbProcess = spawn(
     xvfb,
-    [display, "-screen", "0", `${DASHBOARD_WIDTH}x${VIDEO_HEIGHT}x24`, "-nolisten", "tcp", "-noreset"],
+    [display, "-screen", "0", `${DIRECTOR_WIDTH}x${DIRECTOR_HEIGHT}x24`, "-nolisten", "tcp", "-noreset"],
     {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -388,8 +420,9 @@ export async function startVirtualDashboard(options: {
         "--lang=en-US",
         "--accept-lang=en-US",
         "--window-position=0,0",
-        `--window-size=${DASHBOARD_WIDTH},${VIDEO_HEIGHT}`,
-        `--app=${options.url}/?compact=1`,
+        "--force-device-scale-factor=1",
+        `--window-size=${DIRECTOR_WIDTH},${DIRECTOR_HEIGHT}`,
+        `--app=${options.url}/?director=1`,
       ],
       {
         env: chromeEnvironment,
@@ -451,7 +484,7 @@ export function dashboardRecorderArguments(options: {
     "-f", "x11grab",
     "-draw_mouse", "0",
     "-framerate", "30",
-    "-video_size", `${DASHBOARD_WIDTH}x${VIDEO_HEIGHT}`,
+    "-video_size", `${DIRECTOR_WIDTH}x${DIRECTOR_HEIGHT}`,
     "-i", `${options.display}.0`,
     "-vf", "setsar=1,setpts=N/(30*TB)",
     "-c:v", "libx264",
@@ -712,7 +745,7 @@ async function stopProtonPrefix(
 export function configureCivilizationViDisplay(text: string): string {
   return text
     .replace(/^RenderWidth[ \t]+\d+[ \t]*(\r?)$/m, `RenderWidth ${GAME_WIDTH}$1`)
-    .replace(/^RenderHeight[ \t]+\d+[ \t]*(\r?)$/m, `RenderHeight ${VIDEO_HEIGHT}$1`);
+    .replace(/^RenderHeight[ \t]+\d+[ \t]*(\r?)$/m, `RenderHeight ${DIRECTOR_HEIGHT}$1`);
 }
 
 async function prepareGameDisplayConfig(options: {

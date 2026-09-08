@@ -18,7 +18,7 @@ test("composes native game and transcript streams into CFR 1920x1080 video", asy
       "-t", "0.5", "-c:v", "libx264", "-preset", "ultrafast", game,
     ]),
     expectCommand("ffmpeg", [
-      "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=navy:size=640x1080:rate=30",
+      "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=navy:size=1920x1080:rate=30",
       "-t", "0.5", "-c:v", "libx264", "-preset", "ultrafast", dashboard,
     ]),
   ]);

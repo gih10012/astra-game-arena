@@ -148,6 +148,32 @@ body.compact .badges .badge:last-child { display: none; }
 body.compact footer { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 body.compact .event { font-size: 11px; }
 
+/*
+ * The hidden 1920x1080 director viewport uses the same dashboard as the public
+ * monitor.  Its fixed grid also defines the pixel rectangle used by the native
+ * recording/camera compositor for the uninterrupted private game feed.
+ */
+body.director .shell {
+  grid-template-rows: 52px 79px minmax(0, 1fr) 31px 8px;
+  width: 1920px;
+  height: 1080px;
+  padding: 14px 19px 10px;
+  gap: 10px;
+}
+body.director .top-actions button,
+body.director .configuration { display: none !important; }
+body.director main { grid-template-columns: 1250px minmax(0, 1fr); }
+
+/* Undo legacy compact-mode omissions if an older saved URL contains both. */
+body.compact.director .game-panel,
+body.compact.director .runtime-strip { display: grid !important; }
+body.compact.director main { grid-template-columns: 1250px minmax(0, 1fr); }
+body.compact.director .metrics { grid-template-columns: 1.05fr 1fr 1.35fr 1fr; }
+body.compact.director .metrics article:nth-child(3),
+body.compact.director .metrics article:nth-child(4) { display: block; }
+body.compact.director .badges .badge:last-child { display: inline-block; }
+body.compact.director footer { display: flex; }
+
 @media (max-width: 900px) {
   .badges { display: none; }.top-actions button { padding: 6px 8px; }
   .metrics { grid-template-columns: 1fr 1fr; }.metrics article:nth-child(n+3) { border-top: 1px solid var(--line); }

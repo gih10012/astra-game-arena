@@ -8,6 +8,12 @@ import type {
   VirtualDashboardRuntime,
   VirtualGameRuntime,
 } from "./headless-display.js";
+import {
+  DIRECTOR_GAME_RECT,
+  DIRECTOR_HEIGHT,
+  DIRECTOR_WIDTH,
+  directorCompositionFilter,
+} from "./headless-display.js";
 
 const FPS = 30;
 
@@ -62,13 +68,10 @@ export function virtualCameraFfmpegArguments(options: {
     "-f", "x11grab",
     "-draw_mouse", "0",
     "-framerate", String(FPS),
-    "-video_size", "640x1080",
+    "-video_size", `${DIRECTOR_WIDTH}x${DIRECTOR_HEIGHT}`,
     "-i", `${options.dashboardDisplay}.0`,
     "-filter_complex",
-    `[0:v]scale=1280:1080:force_original_aspect_ratio=decrease:flags=lanczos,` +
-      `pad=1280:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,setpts=N/(${FPS}*TB)[g];` +
-      `[1:v]scale=640:1080:flags=lanczos,setsar=1,setpts=N/(${FPS}*TB)[d];` +
-      `[g][d]hstack=inputs=2:shortest=1,fps=${FPS},setpts=N/(${FPS}*TB),format=yuyv422[v]`,
+    directorCompositionFilter("yuyv422", FPS),
     "-map", "[v]",
     "-an", "-sn",
     "-c:v", "rawvideo",
@@ -104,9 +107,11 @@ export function virtualCameraBrowserStreamArguments(device: string): string[] {
     "-thread_queue_size", "64",
     "-f", "v4l2",
     "-framerate", String(FPS),
-    "-video_size", "1920x1080",
+    "-video_size", `${DIRECTOR_WIDTH}x${DIRECTOR_HEIGHT}`,
     "-i", device,
-    "-vf", `crop=1280:720:0:180,fps=${FPS}`,
+    "-vf",
+    `crop=${DIRECTOR_GAME_RECT.width}:${DIRECTOR_GAME_RECT.height}:` +
+      `${DIRECTOR_GAME_RECT.x}:${DIRECTOR_GAME_RECT.y},fps=${FPS}`,
     "-an", "-sn",
     "-c:v", "mjpeg",
     "-q:v", "5",

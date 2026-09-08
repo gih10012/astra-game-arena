@@ -8,6 +8,8 @@ import {
   configureCivilizationViDisplay,
   continuousGameRecorderArguments,
   dashboardRecorderArguments,
+  DIRECTOR_GAME_RECT,
+  directorCompositionFilter,
   freeXDisplay,
   gameLaunchStrategy,
 } from "../src/headless-display.js";
@@ -59,10 +61,25 @@ test("records the continuous private compositor and dashboard displays", () => {
     output: "/run/dashboard.mkv",
   });
   assert.ok(dashboard.includes(":97.0"));
-  assert.ok(dashboard.includes("640x1080"));
+  assert.ok(dashboard.includes("1920x1080"));
   assert.ok(dashboard.includes("cfr"));
   assert.equal(dashboard.at(-1), "/run/dashboard.mkv");
   assert.equal([...game, ...dashboard].some((argument) => argument.includes("NIRI_SOCKET")), false);
+});
+
+test("composes arbitrary game ratios into the director stage without cropping", () => {
+  const filter = directorCompositionFilter("yuv420p");
+  assert.ok(filter.includes(
+    `scale=${DIRECTOR_GAME_RECT.width}:${DIRECTOR_GAME_RECT.height}:` +
+      "force_original_aspect_ratio=decrease:force_divisible_by=2",
+  ));
+  assert.ok(filter.includes(
+    `pad=${DIRECTOR_GAME_RECT.width}:${DIRECTOR_GAME_RECT.height}:(ow-iw)/2:(oh-ih)/2:color=black`,
+  ));
+  assert.ok(filter.includes(
+    `overlay=${DIRECTOR_GAME_RECT.x}:${DIRECTOR_GAME_RECT.y}:shortest=1`,
+  ));
+  assert.ok(filter.endsWith("format=yuv420p[v]"));
 });
 
 test("reclaims stale private X sockets while preserving a live display", async () => {
