@@ -66,7 +66,11 @@ export async function startVirtualGame(options: {
   const steamEnabled = launchStrategy !== "direct-offline";
   const directExecutableLaunch = launchStrategy !== "steam-managed";
   const steamManagedLaunch = launchStrategy === "steam-managed";
-  const proton = options.game.platform === "windows" && directExecutableLaunch
+  // Resolve Proton for every Windows launch, including Steam-managed games.
+  // Steam can detach Wine descendants from the `steam` launcher process group;
+  // keeping the Proton command available lets us clean that game's prefix both
+  // before startup and during teardown.
+  const proton = options.game.platform === "windows"
     ? await resolveProton()
     : null;
   const keypressCommand = await ensureKeypressHelper(options.rootDirectory);
@@ -111,6 +115,8 @@ export async function startVirtualGame(options: {
   );
   cageProcess.stderr?.pipe(createWriteStream(compositorLog, { flags: "a" }));
   const childProcesses: ChildProcess[] = [cageProcess];
+  let cleanupGameEnvironment: NodeJS.ProcessEnv | null = null;
+  let cleanupSteamEnvironment: NodeJS.ProcessEnv | null = null;
 
   try {
     const hostEnvironment = await waitForJsonEnvironment(
@@ -126,6 +132,17 @@ export async function startVirtualGame(options: {
       ...runtimeEnvironment,
       ...hostEnvironment,
     };
+    const steamRoot = path.join(process.env.HOME ?? "", ".local/share/Steam");
+    const gameEnvironment: NodeJS.ProcessEnv = {
+      ...childEnvironment,
+      STEAM_COMPAT_DATA_PATH: path.join(steamRoot, "steamapps/compatdata", options.game.appId),
+      STEAM_COMPAT_CLIENT_INSTALL_PATH: steamRoot,
+      SteamAppId: options.game.appId,
+      SteamGameId: options.game.appId,
+      PROTON_LOG: "1",
+      PROTON_LOG_DIR: options.runtimeDirectory,
+    };
+    cleanupGameEnvironment = gameEnvironment;
     const captureEnvironment: NodeJS.ProcessEnv = {
       ...runtimeEnvironment,
       WAYLAND_DISPLAY: hostEnvironment.WAYLAND_DISPLAY,
@@ -146,6 +163,9 @@ export async function startVirtualGame(options: {
         "Steam is already running. Close it before a headless challenge so it cannot forward the game to the physical desktop.",
       );
     }
+    if (proton && existsSync(path.join(gameEnvironment.STEAM_COMPAT_DATA_PATH!, "pfx"))) {
+      await stopProtonPrefix(proton, gameEnvironment);
+    }
     let steamProcess: ChildProcess | null = null;
     let steamEnvironment: NodeJS.ProcessEnv | null = null;
     if (steamEnabled) {
@@ -154,6 +174,7 @@ export async function startVirtualGame(options: {
         PROTON_LOG: "1",
         PROTON_LOG_DIR: options.runtimeDirectory,
       };
+      cleanupSteamEnvironment = steamEnvironment;
       if (directExecutableLaunch) {
         const steamDisplay = await freeXDisplay(170, 199);
         const steamXvfbProcess = spawn(
@@ -206,16 +227,6 @@ export async function startVirtualGame(options: {
       }
     }
 
-    const steamRoot = path.join(process.env.HOME ?? "", ".local/share/Steam");
-    const gameEnvironment: NodeJS.ProcessEnv = {
-      ...childEnvironment,
-      STEAM_COMPAT_DATA_PATH: path.join(steamRoot, "steamapps/compatdata", options.game.appId),
-      STEAM_COMPAT_CLIENT_INSTALL_PATH: steamRoot,
-      SteamAppId: options.game.appId,
-      SteamGameId: options.game.appId,
-      PROTON_LOG: "1",
-      PROTON_LOG_DIR: options.runtimeDirectory,
-    };
     let gameProcess: ChildProcess | null = null;
     if (directExecutableLaunch) {
       gameProcess = spawn(
@@ -259,12 +270,7 @@ export async function startVirtualGame(options: {
       close: async () => {
         if (gameProcess) stopProcessGroup(gameProcess, "SIGTERM");
         await delay(500);
-        if (proton && gameProcess) {
-          await runCommand(proton, ["runinprefix", "wineserver", "-k"], {
-            env: gameEnvironment,
-            timeoutMs: 5_000,
-          }).catch(() => undefined);
-        }
+        if (proton) await stopProtonPrefix(proton, gameEnvironment);
         if (steamProcess && steamEnvironment) {
           await runCommand("steam", ["-shutdown"], {
             env: steamEnvironment,
@@ -279,6 +285,15 @@ export async function startVirtualGame(options: {
       },
     };
   } catch (error) {
+    if (cleanupSteamEnvironment) {
+      await runCommand("steam", ["-shutdown"], {
+        env: cleanupSteamEnvironment,
+        timeoutMs: 5_000,
+      }).catch(() => undefined);
+    }
+    if (proton && cleanupGameEnvironment) {
+      await stopProtonPrefix(proton, cleanupGameEnvironment);
+    }
     for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");
     await rm(waylandRuntimeDirectory, { recursive: true, force: true });
     throw error;
@@ -646,6 +661,20 @@ function stopProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   // runner cannot keep the watchdog blocked waiting for Node's event loop.
   child.stdout?.destroy();
   child.stderr?.destroy();
+}
+
+async function stopProtonPrefix(
+  proton: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  await runCommand(proton, ["runinprefix", "wineserver", "-k"], {
+    env: environment,
+    timeoutMs: 5_000,
+  }).catch(() => undefined);
+  await runCommand(proton, ["runinprefix", "wineserver", "-w"], {
+    env: environment,
+    timeoutMs: 5_000,
+  }).catch(() => undefined);
 }
 
 function logChildOutput(child: ChildProcess, filename: string): void {
