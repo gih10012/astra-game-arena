@@ -21,7 +21,7 @@ The initial recording starts on the real title page before any Enter key is sent
 
 Changing the goal or an agent setting (including search, browser, and helper-tool guidance) hot-reloads only the Codex client on the same thread. The game, timer, recorder, virtual camera, and current video part stay continuous. This boundary is logged but is not a snapshot or recording cut.
 
-If a service restart interrupts the final composite pass, recovery starts the next game attempt first. The independent low-priority assembler rebuilds the prior part atomically from its preserved raw game/dashboard streams, and the live runner adopts the completed part without pausing gameplay.
+If a service restart interrupts either the per-part composite or cumulative-production pass, recovery starts the next game attempt first. The independent low-priority assembler rebuilds the prior part atomically from its preserved raw game/dashboard streams, refreshes the production cut, and the live runner adopts the completed part without pausing gameplay.
 
 The director dashboard shows:
 

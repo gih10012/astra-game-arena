@@ -60,7 +60,6 @@ import {
 import { RolloutTailer } from "./rollout-tailer.js";
 import {
   assembleRecordings,
-  recordingTimingReconciliation,
   type RecordingAssembly,
 } from "./recording-assembly.js";
 import {
@@ -337,7 +336,7 @@ export async function cancelChallenge(runDirectory: string): Promise<RunOutcome>
 }
 
 async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome> {
-  let prior = checkpointStore.snapshot();
+  const prior = checkpointStore.snapshot();
   let attempt = prior.attempt + 1;
   const initialPart = String(attempt).padStart(4, "0");
   const runDirectory = prior.runDirectory;
@@ -356,26 +355,6 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   const paths = defaultGamePaths();
   const isParabox = selectedGame.appId === "1260520";
   const audit = new AuditLog(runDirectory);
-  if (
-    prior.options.record &&
-    prior.attempt > 0 &&
-    checkpointStore.snapshot().recordings.length > 0
-  ) {
-    try {
-      const assembly = await assembleRecordings(runDirectory);
-      const reconciliation = recordingTimingReconciliation(
-        checkpointStore.snapshot(),
-        assembly,
-      );
-      if (reconciliation) {
-        await checkpointStore.update({ elapsedMs: reconciliation.afterElapsedMs });
-        prior = checkpointStore.snapshot();
-        await audit.append("timing.reconciled", reconciliation);
-      }
-    } catch (error) {
-      await audit.append("timing.reconciliation.warning", String(error));
-    }
-  }
   const state = new ChallengeState(
     prior.options.model ?? "gpt-6-astra",
     isParabox ? TARGET_LEVELS : 0,
