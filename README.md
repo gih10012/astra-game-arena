@@ -185,6 +185,8 @@ sudo modprobe v4l2loopback video_nr=10 card_label="Astra Game Arena" exclusive_c
 
 Then enable **输出虚拟摄像头** in the challenge settings (or pass `--virtual-camera /dev/video10`). OBS, Tencent Meeting, and other V4L2 clients can select **Astra Game Arena**. The output is live-only and independent of the on-disk recording toggle. `npm run doctor` reports whether a writable loopback device is ready.
 
+While that output is active, the monitor's game pane uses the loopback device through the same-origin `/api/live.mjpeg` endpoint at 1280×720 / 30 FPS. It falls back to the last auditable JPEG frame whenever the camera is disabled, paused, or stopped; the browser never receives direct device access or a camera-permission prompt.
+
 Codex receives matching MCP tools named `challenge_time` and `challenge_tokens`, plus `observe_screen`, `press_keys`, `type_text`, `mouse`, and `complete_challenge`. Referee progress is viewer-only and is not returned to the model.
 
 The runner follows the documented `codex exec --json` stream and the local rollout's incremental token events. See the [Codex non-interactive mode documentation](https://learn.chatgpt.com/docs/non-interactive-mode) and [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).

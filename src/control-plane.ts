@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { open, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -22,7 +23,10 @@ import {
 import { cancelChallenge, queueChallenge } from "./runner.js";
 import { restoreFromRecovery } from "./save-guard.js";
 import { discoverInstalledSteamGames } from "./steam-catalog.js";
-import { discoverVirtualCameraDevices } from "./virtual-camera.js";
+import {
+  discoverVirtualCameraDevices,
+  virtualCameraBrowserStreamArguments,
+} from "./virtual-camera.js";
 
 const webRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -55,6 +59,7 @@ export class ControlPlane {
   #transcript: TranscriptRecord[] = [];
   #frame: { data: Buffer; type: string; etag: string } | null = null;
   #clients = new Set<ServerResponse>();
+  #livePreviews = new Map<ServerResponse, ChildProcess>();
   #lastStateJson = "";
   #lastTranscriptKey = "";
   #lastFrameEtag = "";
@@ -98,6 +103,11 @@ export class ControlPlane {
     this.#refreshTimer = null;
     for (const client of this.#clients) client.end();
     this.#clients.clear();
+    for (const [client, process] of this.#livePreviews) {
+      stopLivePreview(process);
+      client.end();
+    }
+    this.#livePreviews.clear();
     if (!this.#server) return;
     const server = this.#server;
     this.#server = null;
@@ -227,6 +237,14 @@ export class ControlPlane {
         });
         response.end(this.#frame.data);
       }
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/live.mjpeg") {
+      const camera = virtualCameraStatus(this.#checkpoint);
+      if (!camera.active || !camera.device) {
+        throw new HttpError(409, "Live preview is available while the virtual camera is active");
+      }
+      this.#startLivePreview(response, camera.device);
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/events") {
@@ -366,6 +384,57 @@ export class ControlPlane {
     throw new HttpError(404, "not found");
   }
 
+  #startLivePreview(
+    response: ServerResponse,
+    device: string,
+  ): void {
+    const process = spawn(
+      "ffmpeg",
+      virtualCameraBrowserStreamArguments(device),
+      { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    this.#livePreviews.set(response, process);
+    response.writeHead(200, {
+      "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache",
+      Connection: "close",
+      "X-Content-Type-Options": "nosniff",
+    });
+    process.stdout?.pipe(response);
+
+    let stderr = "";
+    process.stderr?.on("data", (chunk: Buffer) => {
+      if (stderr.length < 8_192) stderr += chunk.toString("utf8");
+    });
+    const finish = () => {
+      if (this.#livePreviews.get(response) !== process) return;
+      this.#livePreviews.delete(response);
+      process.stdout?.unpipe(response);
+      if (!response.writableEnded) response.end();
+    };
+    response.once("close", () => {
+      stopLivePreview(process);
+      finish();
+    });
+    process.once("error", (error) => {
+      this.#broadcast("supervisor", {
+        type: "supervisor.warning",
+        message: `Live preview failed: ${error.message}`,
+      });
+      finish();
+    });
+    process.once("exit", (code) => {
+      if (code !== 0 && stderr.trim()) {
+        this.#broadcast("supervisor", {
+          type: "supervisor.warning",
+          message: `Live preview stopped: ${stderr.trim().slice(-1_000)}`,
+        });
+      }
+      finish();
+    });
+  }
+
   #broadcastChanges(): void {
     const stateJson = JSON.stringify(this.#snapshot);
     if (stateJson !== this.#lastStateJson) {
@@ -386,6 +455,15 @@ export class ControlPlane {
   #broadcast(name: string, value: unknown): void {
     const payload = `event: ${name}\ndata: ${JSON.stringify(value)}\n\n`;
     for (const client of this.#clients) client.write(payload);
+  }
+}
+
+function stopLivePreview(child: ChildProcess): void {
+  if (child.exitCode !== null || !child.pid) return;
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    // The preview process already exited.
   }
 }
 

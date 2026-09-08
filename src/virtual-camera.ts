@@ -96,6 +96,26 @@ export function virtualCameraGameRecorderArguments(outputName: string): string[]
   ];
 }
 
+export function virtualCameraBrowserStreamArguments(device: string): string[] {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "warning",
+    "-fflags", "nobuffer",
+    "-flags", "low_delay",
+    "-thread_queue_size", "64",
+    "-f", "v4l2",
+    "-framerate", String(FPS),
+    "-video_size", "1920x1080",
+    "-i", device,
+    "-vf", `crop=1280:720:0:180,fps=${FPS}`,
+    "-an", "-sn",
+    "-c:v", "mjpeg",
+    "-q:v", "5",
+    "-flush_packets", "1",
+    "-f", "mpjpeg",
+    "pipe:1",
+  ];
+}
+
 export async function startVirtualCamera(options: {
   device: string;
   game: VirtualGameRuntime;

@@ -7,6 +7,7 @@ const state = {
   localReceivedAt: 0,
   transcriptSequences: new Set(),
   itemRows: new Map(),
+  livePreviewDevice: null,
 };
 
 if (compact) document.body.classList.add("compact");
@@ -193,11 +194,32 @@ function replaceTranscript(records) {
 }
 
 function showFrame(version = Date.now()) {
+  if (state.livePreviewDevice) return;
   const image = byId("game-frame");
+  image.dataset.mode = "snapshot";
   image.src = `/api/frame?v=${encodeURIComponent(version)}`;
   image.style.display = "block";
   byId("frame-placeholder").style.display = "none";
   byId("frame-time").textContent = new Date().toISOString();
+}
+
+function updateLivePreview(camera) {
+  const device = camera?.active ? camera.device : null;
+  if (device && state.livePreviewDevice === device) return;
+  const image = byId("game-frame");
+  if (!device) {
+    if (!state.livePreviewDevice) return;
+    state.livePreviewDevice = null;
+    image.dataset.mode = "snapshot";
+    showFrame("live-ended");
+    return;
+  }
+  state.livePreviewDevice = device;
+  image.dataset.mode = "live";
+  image.src = `/api/live.mjpeg?device=${encodeURIComponent(device)}&t=${Date.now()}`;
+  image.style.display = "block";
+  byId("frame-placeholder").style.display = "none";
+  byId("frame-time").textContent = "LIVE · 30 FPS";
 }
 
 async function loadOptions() {
@@ -335,6 +357,7 @@ async function refreshSupervisor() {
     byId("virtual-camera-state").textContent = camera?.active
       ? `LIVE ${camera.device}`
       : camera?.enabled ? `PAUSED ${camera.device}` : "OFF";
+    updateLivePreview(camera);
     updateControls();
   } catch {
     byId("daemon-state").textContent = "RECONNECTING";
@@ -381,6 +404,15 @@ events.addEventListener("state", (event) => applySnapshot(JSON.parse(event.data)
 events.addEventListener("transcript", (event) => addTranscript(JSON.parse(event.data)));
 events.addEventListener("transcript_reset", (event) => replaceTranscript(JSON.parse(event.data)));
 events.addEventListener("frame", (event) => showFrame(JSON.parse(event.data).sha256));
+
+byId("game-frame").addEventListener("error", () => {
+  const image = byId("game-frame");
+  if (image.dataset.mode !== "live") return;
+  state.livePreviewDevice = null;
+  image.dataset.mode = "snapshot";
+  byId("frame-time").textContent = "live feed reconnecting";
+  showFrame("live-error");
+});
 
 if (!compact) {
   byId("configure-button").addEventListener("click", () => { byId("configuration").hidden = false; });
