@@ -207,6 +207,17 @@ export class X11GameAdapter implements GameAdapter {
     });
   }
 
+  async hasGameWindow(): Promise<boolean> {
+    return await this.#exclusive(async () => {
+      try {
+        await this.discover();
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
   async waitForVisibleFrame(
     timeoutMs: number,
     cancelled: () => boolean = () => false,

@@ -283,6 +283,7 @@ export async function startVirtualGame(options: {
             timeoutMs: 5_000,
           }).catch(() => undefined);
           stopProcessGroup(steamProcess, "SIGTERM");
+          await ensureSteamStopped();
         }
         await restoreGameDisplayConfig?.();
         stopProcessGroup(cageProcess, "SIGTERM");
@@ -297,6 +298,7 @@ export async function startVirtualGame(options: {
         env: cleanupSteamEnvironment,
         timeoutMs: 5_000,
       }).catch(() => undefined);
+      await ensureSteamStopped();
     }
     if (proton && cleanupGameEnvironment) {
       await stopProtonPrefix(proton, cleanupGameEnvironment);
@@ -642,6 +644,24 @@ function processIsAlive(pid: number): boolean {
 async function steamIsRunning(): Promise<boolean> {
   const result = await runCommand("pgrep", ["-x", "steam"]);
   return result.code === 0;
+}
+
+async function ensureSteamStopped(): Promise<void> {
+  const waitUntilStopped = async (timeoutMs: number) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!(await steamIsRunning())) return true;
+      await delay(250);
+    }
+    return !(await steamIsRunning());
+  };
+  if (await waitUntilStopped(10_000)) return;
+  await runCommand("pkill", ["-TERM", "-x", "steam"], { timeoutMs: 2_000 })
+    .catch(() => undefined);
+  if (await waitUntilStopped(3_000)) return;
+  await runCommand("pkill", ["-KILL", "-x", "steam"], { timeoutMs: 2_000 })
+    .catch(() => undefined);
+  await waitUntilStopped(2_000);
 }
 
 function withoutPhysicalDisplay(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

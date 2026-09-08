@@ -381,10 +381,13 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   const eventTasks = new Set<Promise<void>>();
   let savePoll: NodeJS.Timeout | null = null;
   let checkpointPoll: NodeJS.Timeout | null = null;
+  let gameHealthPoll: NodeJS.Timeout | null = null;
   let powerPoll: NodeJS.Timeout | null = null;
   let accountPoll: NodeJS.Timeout | null = null;
   const checkpointWork: { current: Promise<void> | null } = { current: null };
   let checkpointBusy = false;
+  let gameHealthBusy = false;
+  let missingGameHealthChecks = 0;
   let restored = false;
   let quotaExhausted = false;
   let quotaResetAtMs: number | null = null;
@@ -392,7 +395,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let reservePauseRequested = false;
   let accountRotationRequested = false;
   let exitDescription = "Codex exited before completion";
-  let requestedStop: "pause" | "restart" | null = null;
+  let requestedStop: "pause" | "restart" | "game-exit" | null = null;
   let powerPauseRequested = false;
   let lastPowerState: PowerState | null = null;
   let powerPauseReason = "Low battery; snapshot saved until wake or external power";
@@ -791,6 +794,30 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             checkpointBusy = false;
           });
       }, 5_000);
+      gameHealthPoll = setInterval(() => {
+        if (gameHealthBusy || requestedStop !== null) return;
+        gameHealthBusy = true;
+        void activeGame.hasGameWindow()
+          .then(async (available) => {
+            missingGameHealthChecks = available ? 0 : missingGameHealthChecks + 1;
+            if (missingGameHealthChecks < 3 || requestedStop !== null) return;
+            requestedStop = "game-exit";
+            exitDescription = "The selected game window exited unexpectedly";
+            activeController.cancelPendingActions();
+            activeController.publishTranscript({
+              type: "runner.game_exited",
+              message: exitDescription,
+            });
+            await audit.append("game.exited", { attempt, message: exitDescription });
+            stopCodex();
+          })
+          .catch((error: unknown) => {
+            void audit.append("game.health.warning", String(error));
+          })
+          .finally(() => {
+            gameHealthBusy = false;
+          });
+      }, 2_000);
       await checkPower();
       powerPoll = setInterval(() => {
         void checkPower().catch((error: unknown) => {
@@ -968,12 +995,14 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         await stopVirtualCamera();
 
         if (state.snapshot().status === "completed") break;
-        const runtimeFrame = await captureRuntimeSnapshot(
-          runDirectory,
-          attempt,
-          activeGame,
-          audit,
-        );
+        const runtimeFrame = requestedStop === "game-exit"
+          ? null
+          : await captureRuntimeSnapshot(
+              runDirectory,
+              attempt,
+              activeGame,
+              audit,
+            );
         if (runtimeFrame) activeController.publishFrame(runtimeFrame);
         await persistAttemptCheckpoint(
           checkpointStore,
@@ -1122,6 +1151,10 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       outcomePhase = "waiting_retry";
       retryAt = new Date().toISOString();
       reason = "Interrupted by shutdown or service restart";
+    } else if (requestedStop === "game-exit") {
+      outcomePhase = "waiting_retry";
+      retryAt = new Date(Date.now() + retryDelayMs(attempt)).toISOString();
+      reason = exitDescription;
     } else {
       outcomePhase = state.snapshot().status === "stopped"
         ? outcomePhase
@@ -1151,6 +1184,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     await Promise.allSettled([...tailerTasks]);
     if (savePoll) clearInterval(savePoll);
     if (checkpointPoll) clearInterval(checkpointPoll);
+    if (gameHealthPoll) clearInterval(gameHealthPoll);
     if (powerPoll) clearInterval(powerPoll);
     if (accountPoll) clearInterval(accountPoll);
     if (checkpointWork.current) {
