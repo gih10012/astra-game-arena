@@ -156,3 +156,16 @@ test("updates the visible model immediately and emits only for a real change", (
   assert.equal(state.snapshot().model, "gpt-5.6-sol");
   assert.deepEqual(models, ["gpt-5.6-sol"]);
 });
+
+test("updates the visible goal immediately and emits only for a real change", () => {
+  const state = new ChallengeState("gpt-6-astra", 0, 1, "Old goal");
+  const goals: string[] = [];
+  state.on("change", (snapshot) => goals.push(snapshot.goal));
+
+  state.setGoal("New goal");
+  state.setGoal("New goal");
+
+  assert.equal(state.goal, "New goal");
+  assert.equal(state.snapshot().goal, "New goal");
+  assert.deepEqual(goals, ["New goal"]);
+});

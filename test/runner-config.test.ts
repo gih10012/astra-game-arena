@@ -13,10 +13,12 @@ import {
   extractQuotaResetAtFromText,
   hasHistoricalUnsupportedChatGptModel,
   ensureCodexThreadInBase,
+  initialPrompt,
   NEUTRAL_PROMPT,
   outcomeAfterCleanup,
   quotaRetryAt,
   RESUME_PROMPT,
+  continuationPrompt,
 } from "../src/runner.js";
 
 test("makes teardown failures visible in the checkpoint outcome", () => {
@@ -77,6 +79,37 @@ test("disables search and browsers while retaining normal Codex capabilities", (
     args.includes('mcp_servers.game.default_tools_approval_mode="approve"'),
   );
   assert.equal(args.some((argument) => argument.includes("view_image")), false);
+});
+
+test("enables live web search and browser surfaces independently of other tools", () => {
+  const args = codexArguments({
+    mcpEntry: "/arena/mcp.js",
+    arenaUrl: "http://127.0.0.1:4317",
+    controlToken: "secret",
+    reasoningEffort: "high",
+    webSearchEnabled: true,
+    browserUseEnabled: true,
+  });
+  assert.ok(args.includes('web_search="live"'));
+  assert.ok(args.includes("tools.web_search=true"));
+  assert.ok(args.includes("features.browser_use=true"));
+  assert.ok(args.includes("features.browser_use_external=true"));
+  assert.ok(args.includes("features.in_app_browser=true"));
+});
+
+test("restates a changed goal and optional local-tool guidance on continuation", () => {
+  const prompt = continuationPrompt("Create a single-player game", {
+    webSearchEnabled: false,
+    browserUseEnabled: false,
+    toolCreationGuidance: true,
+  });
+  assert.match(prompt, /current goal: Create a single-player game/);
+  assert.match(prompt, /Do not use web search/);
+  assert.match(prompt, /Do not use an internet browser/);
+  assert.match(prompt, /create and use local scripts and auxiliary tools/);
+  assert.match(prompt, /skills and sub-agents/);
+  assert.match(prompt, /optimize for elapsed time and token use/);
+  assert.doesNotMatch(initialPrompt("Win", "Test Game"), /sub-agents/);
 });
 
 test("passes the selected credential home through the local Codex launcher", () => {

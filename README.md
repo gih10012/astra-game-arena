@@ -2,7 +2,7 @@
 
 A reproducible, screen-only arena for testing whether a Codex model can complete a natural-language goal in a locally installed Steam game. Patrick's Parabox (364 official levels) is the first fully verified adapter; other installed games use the same best-effort private desktop and input boundary.
 
-The model receives one neutral task sentence, rendered game frames, keyboard actions, and two self-inspection tools for elapsed time and token usage. It receives no walkthrough, level data, or save contents. Native web search and network browsers are disabled; normal Codex capabilities such as Shell, skills, plugins, memory, and sub-agents remain available.
+The model receives a natural-language goal, rendered game frames, keyboard/mouse actions, and two self-inspection tools for elapsed time and token usage. It receives no walkthrough, level data, or save contents. Native web search and network browsers default to disabled; normal Codex capabilities such as Shell, skills, plugins, memory, and sub-agents remain available.
 
 > This repository contains no game binary, game assets, save data, or recorded footage. A legitimately purchased Steam copy of Patrick's Parabox is required.
 
@@ -118,11 +118,12 @@ Defaults:
 - reasoning effort: `high`
 - completion: agent-declared success for the configured goal (Parabox referee reports `364/364`)
 - prompt: generated from the configured natural-language goal and isolated computer-use tools
+- optional prompt guidance: explicitly encourages creating and using local scripts, skills, and sub-agents when that saves time or tokens
 - recording: 1920×1080, 30 FPS Matroska parts from private displays
 - virtual camera: optional 1920×1080, 30 FPS V4L2 output with the same game/session layout
 - UI: native game at 1920×1080; the final 1280×1080 game pane preserves its aspect ratio, beside a 640×1080 director dashboard
 - physical desktop windows: none by default; `--browser` opens only the monitoring dashboard
-- native web search and network browsers: disabled
+- native web search and network browsers: disabled by default, independently configurable
 - Shell: enabled in an empty writable workspace with standard network behavior
 - skills, plugins, apps, memory, and sub-agents: retained from the selected Codex home
 - quota retry: reported reset time + 1 minute; 5-hour fallback
@@ -169,6 +170,14 @@ Steamworks or Steam DRM; launch failures remain visible in the director
 transcript and run logs. The control page exposes all three modes in its
 “游戏启动方式” selector; legacy `--offline` remains an alias for `direct`.
 
+While a challenge is active, the control page can change the goal, model,
+reasoning effort, Web Search, Browser Use, helper-tool guidance, recording,
+virtual camera, account pool, and quota policy. Goal and agent-setting changes
+restart only `codex exec` and resume the same Codex thread; the game, official
+timer, recording process, virtual camera, and current recording part remain
+live. Game and GPU selection stay locked. Changing the launch mode is the
+exception: it snapshots and restarts the private game runtime.
+
 Run artifacts are written under `runs/` and ignored by Git. Interrupted recording parts remain independently playable. At every sealed snapshot boundary, the runner atomically refreshes `production/challenge-production-so-far.mkv`; an independent assembler service applies the same operation to a runner that was already active during an upgrade. It cuts each resumed part at the recorded active-time boundary, normalizes that part once, then stream-copies the normalized parts into the cumulative video. `assemble` performs the operation on demand without touching an open part. On completion the output is `production/challenge-complete.mkv`. Non-destructive repaired release copies take precedence over damaged originals. Each completed run ends with a SHA-256 manifest. Keep the raw artifacts next to the published video or release them separately; do not commit game frames or save files to this repository.
 
 ## Public interfaces
@@ -179,6 +188,7 @@ The loopback director server exposes:
 - `GET /api/challenge/tokens` — cumulative input, cached input, output, reasoning output, and total tokens
 - `GET /api/challenge` — dashboard snapshot, including referee-only visible progress
 - `GET /api/status` — complete active configuration, current account five-hour/weekly used and remaining percentages, every account's sanitized telemetry, the earliest pool reset, recording state, and virtual-camera state
+- `PATCH /api/configuration` — hot-update the active goal and agent/media/account settings; Web Search and Browser Use are separate booleans
 - `GET /api/events` — Server-Sent Events for state and transcript updates
 
 ## Optional virtual camera
@@ -198,7 +208,7 @@ Codex receives matching MCP tools named `challenge_time` and `challenge_tokens`,
 
 The runner follows the documented `codex exec --json` stream and the local rollout's incremental token events. See the [Codex non-interactive mode documentation](https://learn.chatgpt.com/docs/non-interactive-mode) and [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-The selected Codex home (or each explicitly configured account home) and its normal configuration stay active. The runner adds the Parabox MCP server, forces the selected model, disables native web search and browser features, and otherwise retains standard Shell, skill, plugin, app, memory, and sub-agent capabilities in a `workspace-write` sandbox. Using any of those capabilities to retrieve external puzzle information invalidates the run; the complete Codex event stream is retained for audit.
+The selected Codex home (or each explicitly configured account home) and its normal configuration stay active. The runner adds the arena MCP server, forces the selected model, applies the separately configured Web Search and Browser Use policy, and otherwise retains standard Shell, skill, plugin, app, memory, and sub-agent capabilities in a `workspace-write` sandbox. For a no-network benchmark, leave both network switches off; using another capability to retrieve external puzzle information still invalidates that run. The complete Codex event stream and each configuration change are retained for audit.
 
 ## Reproducibility
 

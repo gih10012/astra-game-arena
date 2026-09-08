@@ -16,7 +16,7 @@ import {
 export class ChallengeState extends EventEmitter {
   model: string;
   readonly targetLevels: number;
-  readonly goal: string;
+  goal: string;
   readonly game: { appId: string; name: string } | null;
   attempt: number;
   #runId: string | null = null;
@@ -104,6 +104,12 @@ export class ChallengeState extends EventEmitter {
   setModel(model: string): void {
     if (model === this.model) return;
     this.model = model;
+    this.emit("change", this.snapshot());
+  }
+
+  setGoal(goal: string): void {
+    if (goal === this.goal) return;
+    this.goal = goal;
     this.emit("change", this.snapshot());
   }
 

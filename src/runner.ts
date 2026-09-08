@@ -105,9 +105,8 @@ import {
 } from "./virtual-camera.js";
 
 export const DEFAULT_GOAL = "Complete all official levels in Patrick's Parabox.";
-export const NEUTRAL_PROMPT = initialPrompt(DEFAULT_GOAL, "Patrick's Parabox");
-export const RESUME_PROMPT =
-  "Continue the same goal from the current game and conversation state. Use only the private game computer tools for observation and input. Do not search or browse the internet. Call complete_challenge only after visually verifying the goal is fully achieved.";
+export const NEUTRAL_PROMPT = initialPrompt(DEFAULT_GOAL, "Patrick's Parabox", {});
+export const RESUME_PROMPT = continuationPrompt(DEFAULT_GOAL, {});
 
 const DEFAULT_QUOTA_WAIT_MS = 5 * 60 * 60 * 1_000;
 const QUOTA_RESET_GRACE_MS = 60_000;
@@ -132,6 +131,9 @@ export interface RunOptions {
   codexHome?: string;
   quotaWaitMs?: number;
   accountPolicies?: AccountPolicy[];
+  webSearchEnabled?: boolean;
+  browserUseEnabled?: boolean;
+  toolCreationGuidance?: boolean;
 }
 
 export interface RunOutcome {
@@ -193,6 +195,9 @@ async function initializeChallenge(
     isolateSaves: game.appId === "1260520" && options.isolateSaves !== false,
     quotaWaitMs: options.quotaWaitMs ?? DEFAULT_QUOTA_WAIT_MS,
     accountPolicies: options.accountPolicies ?? [],
+    webSearchEnabled: options.webSearchEnabled === true,
+    browserUseEnabled: options.browserUseEnabled === true,
+    toolCreationGuidance: options.toolCreationGuidance === true,
     ...(codexHome ? { codexHome } : {}),
   };
   const initialCheckpoint: RunCheckpoint = {
@@ -229,13 +234,14 @@ async function initializeChallenge(
     gpuPreference: persistedOptions.gpuPreference,
     launchMode: persistedOptions.launchMode,
     offlineMode: persistedOptions.offlineMode,
-    prompt: initialPrompt(goal, game.name),
-    resumePrompt: RESUME_PROMPT,
+    prompt: initialPrompt(goal, game.name, persistedOptions),
+    resumePrompt: continuationPrompt(goal, persistedOptions),
     targetLevels: game.appId === "1260520" ? TARGET_LEVELS : null,
     observationPolicy: "pixels-only",
     actionPolicy: "isolated-keyboard-and-mouse",
-    webSearch: "disabled",
-    networkBrowser: "disabled",
+    webSearch: persistedOptions.webSearchEnabled ? "live" : "disabled",
+    networkBrowser: persistedOptions.browserUseEnabled ? "enabled" : "disabled",
+    toolCreationGuidance: persistedOptions.toolCreationGuidance,
     shellNetwork: "standard",
     standardCodexCapabilities: true,
     codexLauncher: CODEX_COMMAND,
@@ -479,9 +485,11 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let accountRotationRequested = false;
   let configurationRestartRequested = false;
   let configurationRestartAwaitingThread = false;
+  let hotCodexConfigurationRestartRequested = false;
   let recordingFailureRequested = false;
   let runtimeConfigBusy = false;
   let runtimeConfigGeneration = 0;
+  let codexInvocation = 0;
   let quotaFallbackStartedAtMs: number | null = null;
   let unsupportedChatGptModel: string | null = null;
   let exitDescription = "Codex exited before completion";
@@ -496,6 +504,16 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let productionVideo: RecordingAssembly | null = null;
   let controllerUrl: string | null = null;
   const startupAbortController = new AbortController();
+  const configurationCanReloadContinuously = () =>
+    canReloadCodexContinuously({
+      hotRestartRequested: hotCodexConfigurationRestartRequested,
+      stopRequested: requestedStop !== null,
+      powerPauseRequested,
+      recordingFailureRequested,
+      quotaExhausted,
+      reservePauseRequested,
+      accountRotationRequested,
+    });
   let mediaOperations: Promise<void> = Promise.resolve();
   const restoredMediaState = await readRuntimeMediaState(runDirectory);
   let mediaState: RuntimeMediaState = restoredMediaState ? {
@@ -971,6 +989,14 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       const next = { ...previous, ...request.patch };
       const modelChanged = request.patch.model !== undefined &&
         request.patch.model !== previous.model;
+      const goalChanged = request.patch.goal !== undefined &&
+        request.patch.goal !== previous.goal;
+      const searchChanged = request.patch.webSearchEnabled !== undefined &&
+        request.patch.webSearchEnabled !== previous.webSearchEnabled;
+      const browserChanged = request.patch.browserUseEnabled !== undefined &&
+        request.patch.browserUseEnabled !== previous.browserUseEnabled;
+      const toolGuidanceChanged = request.patch.toolCreationGuidance !== undefined &&
+        request.patch.toolCreationGuidance !== previous.toolCreationGuidance;
       const nextCredential = credentialAfterModelChange(
         credential,
         previous.model,
@@ -1055,9 +1081,14 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       credential = nextCredential;
       if (modelChanged) unsupportedChatGptModel = null;
       state.setModel(next.model ?? "gpt-6-astra");
+      state.setGoal(next.goal ?? DEFAULT_GOAL);
 
       let restartCodex = codex !== null && (
         modelChanged ||
+        goalChanged ||
+        searchChanged ||
+        browserChanged ||
+        toolGuidanceChanged ||
         (request.patch.reasoningEffort !== undefined &&
           request.patch.reasoningEffort !== previous.reasoningEffort)
       );
@@ -1083,10 +1114,12 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       }
 
       if (restartCodex) {
+        hotCodexConfigurationRestartRequested =
+          !recordingNeedsRestart && !restartGameRuntime;
         requestCodexRestart(
           recordingNeedsRestart
             ? "Starting a new recording part"
-            : "Applying updated model configuration",
+            : "Applying updated agent configuration",
         );
       }
 
@@ -1489,6 +1522,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         accountRotationRequested = false;
         configurationRestartRequested = false;
         configurationRestartAwaitingThread = false;
+        hotCodexConfigurationRestartRequested = false;
         quotaFallbackStartedAtMs = null;
         unsupportedChatGptModel = null;
         activeAccountId = null;
@@ -1525,6 +1559,10 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           (credential.mode === "api-key" || !accountPool || activeAccountId)
         ) {
           const part = String(attempt).padStart(4, "0");
+          codexInvocation += 1;
+          const invocation = codexInvocation === 1
+            ? ""
+            : `-invocation-${String(codexInvocation).padStart(4, "0")}`;
           const currentThreadId = checkpointStore.snapshot().threadId;
           const currentOptions = checkpointStore.snapshot().options;
           if (currentThreadId) {
@@ -1540,17 +1578,23 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             controlToken: activeController.controlToken,
             reasoningEffort: currentOptions.reasoningEffort,
             model: currentOptions.model ?? "gpt-6-astra",
+            webSearchEnabled: currentOptions.webSearchEnabled === true,
+            browserUseEnabled: currentOptions.browserUseEnabled === true,
             ...(credential.mode === "api-key"
               ? { modelProvider: credential.provider }
               : {}),
             prompt: currentThreadId
-              ? RESUME_PROMPT
-              : initialPrompt(currentOptions.goal ?? DEFAULT_GOAL, selectedGame.name),
+              ? continuationPrompt(currentOptions.goal ?? DEFAULT_GOAL, currentOptions)
+              : initialPrompt(
+                  currentOptions.goal ?? DEFAULT_GOAL,
+                  selectedGame.name,
+                  currentOptions,
+                ),
             ...(currentThreadId ? { resumeThreadId: currentThreadId } : {}),
           });
           const codexStartedAtMs = Date.now();
           await writeFile(
-            path.join(runDirectory, `codex-command-part-${part}.json`),
+            path.join(runDirectory, `codex-command-part-${part}${invocation}.json`),
             `${JSON.stringify({ command: CODEX_COMMAND, args: redactControlToken(args) }, null, 2)}\n`,
           );
           codex = spawn(CODEX_COMMAND, args, {
@@ -1637,7 +1681,9 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           let codexExitedWhileRunning = false;
           const exitPromise = once(activeCodex, "exit").then(([code, signal]) => {
             codexExitedWhileRunning = state.snapshot().status === "running";
-            interruptActiveTiming(state, () => undefined);
+            if (!configurationCanReloadContinuously()) {
+              interruptActiveTiming(state, () => undefined);
+            }
             return {
               code: typeof code === "number" ? code : null,
               signal: typeof signal === "string" ? signal : null,
@@ -1678,6 +1724,27 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           await Promise.allSettled([...eventTasks]);
           await activateApiKeyFallback();
           codex = null;
+        }
+        if (configurationCanReloadContinuously()) {
+          await persistAttemptCheckpoint(
+            checkpointStore,
+            state,
+            prior.options.isolateSaves && isParabox ? saveGuard : null,
+          );
+          await audit.append("codex.configuration_reloaded", {
+            attempt,
+            threadId: checkpointStore.snapshot().threadId,
+            runtimePreserved: true,
+            recordingPreserved: recorder !== null,
+            virtualCameraPreserved: virtualCamera !== null,
+            snapshot: state.snapshot(),
+          });
+          activeController.publishTranscript({
+            type: "runner.configuration_reloaded",
+            message:
+              "Agent configuration reloaded on the same thread; game, timer, recording, and virtual camera remained live.",
+          });
+          continue;
         }
         if (state.snapshot().status !== "completed") state.pause();
         await stopRecording();
@@ -2086,6 +2153,24 @@ export function activateTimedAttempt(options: {
   return true;
 }
 
+export function canReloadCodexContinuously(options: {
+  hotRestartRequested: boolean;
+  stopRequested: boolean;
+  powerPauseRequested: boolean;
+  recordingFailureRequested: boolean;
+  quotaExhausted: boolean;
+  reservePauseRequested: boolean;
+  accountRotationRequested: boolean;
+}): boolean {
+  return options.hotRestartRequested &&
+    !options.stopRequested &&
+    !options.powerPauseRequested &&
+    !options.recordingFailureRequested &&
+    !options.quotaExhausted &&
+    !options.reservePauseRequested &&
+    !options.accountRotationRequested;
+}
+
 export function recordingFailureOutcome(
   attempt: number,
   reason: string,
@@ -2135,10 +2220,14 @@ export function codexArguments(options: {
   reasoningEffort: string;
   model?: string;
   modelProvider?: string;
+  webSearchEnabled?: boolean;
+  browserUseEnabled?: boolean;
   prompt?: string;
   resumeThreadId?: string;
 }): string[] {
   const config = (key: string, value: string) => ["-c", `${key}=${value}`];
+  const webSearchEnabled = options.webSearchEnabled === true;
+  const browserUseEnabled = options.browserUseEnabled === true;
   const common = [
     "exec",
     "--json",
@@ -2150,11 +2239,11 @@ export function codexArguments(options: {
     "workspace-write",
     "--skip-git-repo-check",
     ...config("approval_policy", '"never"'),
-    ...config("web_search", '"disabled"'),
-    ...config("tools.web_search", "false"),
-    ...config("features.browser_use", "false"),
-    ...config("features.browser_use_external", "false"),
-    ...config("features.in_app_browser", "false"),
+    ...config("web_search", webSearchEnabled ? '"live"' : '"disabled"'),
+    ...config("tools.web_search", webSearchEnabled ? "true" : "false"),
+    ...config("features.browser_use", browserUseEnabled ? "true" : "false"),
+    ...config("features.browser_use_external", browserUseEnabled ? "true" : "false"),
+    ...config("features.in_app_browser", browserUseEnabled ? "true" : "false"),
     ...config("model_reasoning_effort", `"${options.reasoningEffort}"`),
     ...(options.modelProvider
       ? config("model_provider", JSON.stringify(options.modelProvider))
@@ -2217,13 +2306,55 @@ export async function hasHistoricalUnsupportedChatGptModel(
   return false;
 }
 
-function initialPrompt(goal: string, gameName: string): string {
-  return [
+interface PromptPolicy {
+  webSearchEnabled?: boolean;
+  browserUseEnabled?: boolean;
+  toolCreationGuidance?: boolean;
+}
+
+export function initialPrompt(
+  goal: string,
+  gameName: string,
+  policy: PromptPolicy = {},
+): string {
+  const instructions = [
     `Goal: ${goal}`,
     `You control ${gameName} through the game MCP tools. Observe only rendered pixels and interact only through the isolated keyboard and mouse tools.`,
-    "Do not search or browse the internet. Work autonomously and optimize for elapsed time and token use.",
+    capabilityInstruction(policy),
+    "Work autonomously and optimize for elapsed time and token use.",
     "You decide whether the goal is complete. Call complete_challenge with a concise evidence summary only after visually verifying full completion; otherwise keep working.",
-  ].join("\n");
+  ];
+  if (policy.toolCreationGuidance) instructions.splice(3, 0, toolCreationInstruction());
+  return instructions.join("\n");
+}
+
+export function continuationPrompt(
+  goal: string,
+  policy: PromptPolicy = {},
+): string {
+  const instructions = [
+    `Continue the same conversation with this current goal: ${goal}`,
+    "Continue from the current game state. Use only the private game computer tools for game observation and input.",
+    capabilityInstruction(policy),
+    "Work autonomously and optimize for elapsed time and token use.",
+    "Call complete_challenge only after visually verifying the current goal is fully achieved.",
+  ];
+  if (policy.toolCreationGuidance) instructions.splice(3, 0, toolCreationInstruction());
+  return instructions.join("\n");
+}
+
+function capabilityInstruction(policy: PromptPolicy): string {
+  const search = policy.webSearchEnabled
+    ? "Web search is enabled."
+    : "Do not use web search.";
+  const browser = policy.browserUseEnabled
+    ? "Internet Browser Use is enabled."
+    : "Do not use an internet browser.";
+  return `${search} ${browser}`;
+}
+
+function toolCreationInstruction(): string {
+  return "You may create and use local scripts and auxiliary tools, including skills and sub-agents, whenever doing so reduces elapsed time or token usage. Keep all game observation and input inside the private game-computer boundary.";
 }
 
 function normalizeGoal(value: string): string {

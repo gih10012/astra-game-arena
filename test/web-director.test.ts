@@ -15,4 +15,7 @@ test("director bootstrap uses the internal controller event and supervisor surfa
   assert.match(script, /events\.addEventListener\("state"/);
   assert.match(script, /events\.addEventListener\("transcript"/);
   assert.match(script, /events\.addEventListener\("frame"/);
+  assert.match(script, /configured\.webSearchEnabled === true/);
+  assert.match(script, /configured\.browserUseEnabled === true/);
+  assert.match(script, /toolCreationGuidance: byId\("tool-guidance-toggle"\)\.checked/);
 });

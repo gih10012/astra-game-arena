@@ -18,7 +18,8 @@
         </div>
         <div class="top-actions">
           <div class="badges">
-            <span class="badge safe"><i></i> WEB SEARCH OFF</span>
+            <span id="web-search-badge" class="badge safe"><i></i> <b id="web-search-state">WEB SEARCH OFF</b></span>
+            <span id="browser-use-badge" class="badge safe"><i></i> <b id="browser-use-state">BROWSER OFF</b></span>
             <span class="badge"><i id="daemon-dot"></i> SUPERVISOR <b id="daemon-state">ONLINE</b></span>
           </div>
           <button id="configure-button" class="secondary">配置挑战</button>
@@ -84,6 +85,21 @@
               <span>虚拟摄像头设备</span>
               <select id="virtual-camera-select" name="virtualCameraDevice"></select>
               <small id="virtual-camera-detail">检测 V4L2 loopback 设备</small>
+            </label>
+            <label class="record-switch">
+              <input id="web-search-toggle" name="webSearchEnabled" type="checkbox" />
+              <span class="switch"></span>
+              <span><b>允许网络搜索</b><small>实时切换 Codex Web Search；默认关闭</small></span>
+            </label>
+            <label class="record-switch">
+              <input id="browser-use-toggle" name="browserUseEnabled" type="checkbox" />
+              <span class="switch"></span>
+              <span><b>允许联网浏览器</b><small>实时切换 Codex Browser Use；默认关闭</small></span>
+            </label>
+            <label class="record-switch">
+              <input id="tool-guidance-toggle" name="toolCreationGuidance" type="checkbox" />
+              <span class="switch"></span>
+              <span><b>鼓励创建辅助工具</b><small>提示 Agent 用本地脚本、技能或子 Agent 节约时间和 Token</small></span>
             </label>
             <label class="field goal-field">
               <span>自然语言目标</span>

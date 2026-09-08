@@ -3,6 +3,7 @@ import test from "node:test";
 import { ChallengeState } from "../src/challenge-state.js";
 import {
   activateTimedAttempt,
+  canReloadCodexContinuously,
   interruptActiveTiming,
   recordingFailureOutcome,
 } from "../src/runner.js";
@@ -59,5 +60,32 @@ test("schedules recorder coverage failures as ordinary attempt retries", () => {
       retryAt: "1970-01-01T00:02:01.000Z",
       reason: "Recording coverage failed",
     },
+  );
+});
+
+test("reloads only agent configuration without interrupting a healthy runtime", () => {
+  const healthy = {
+    hotRestartRequested: true,
+    stopRequested: false,
+    powerPauseRequested: false,
+    recordingFailureRequested: false,
+    quotaExhausted: false,
+    reservePauseRequested: false,
+    accountRotationRequested: false,
+  };
+  assert.equal(canReloadCodexContinuously(healthy), true);
+  for (const field of [
+    "stopRequested",
+    "powerPauseRequested",
+    "recordingFailureRequested",
+    "quotaExhausted",
+    "reservePauseRequested",
+    "accountRotationRequested",
+  ] as const) {
+    assert.equal(canReloadCodexContinuously({ ...healthy, [field]: true }), false);
+  }
+  assert.equal(
+    canReloadCodexContinuously({ ...healthy, hotRestartRequested: false }),
+    false,
   );
 });

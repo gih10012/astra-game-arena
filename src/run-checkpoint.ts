@@ -36,6 +36,9 @@ export interface PersistedRunOptions {
   codexHome?: string;
   quotaWaitMs: number;
   accountPolicies?: AccountPolicy[];
+  webSearchEnabled?: boolean;
+  browserUseEnabled?: boolean;
+  toolCreationGuidance?: boolean;
 }
 
 export interface AccountPolicy {

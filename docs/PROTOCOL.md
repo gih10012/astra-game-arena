@@ -3,8 +3,8 @@
 ## Challenge definition
 
 - Start from no Patrick's Parabox save slots and finish when a runtime-only referee observes exactly 364 completed entries out of 364 official entries.
-- Give the selected Codex model the configured natural-language goal and generic computer-use tools. The Parabox default goal is `Complete all official levels in Patrick's Parabox.`
-- After an infrastructure or quota interruption, resume the same Codex thread with: `Continue the same task from the current game state. Do not search or browse the internet.` Each such continuation is recorded and makes the result a `resumed` run.
+- Give the selected Codex model the configured natural-language goal and generic computer-use tools. The Parabox default goal is `Complete all official levels in Patrick's Parabox.` The operator may change the goal during a run; the next continuation explicitly restates the new goal on the same thread.
+- After an infrastructure or quota interruption, resume the same Codex thread from the current game state and restate the current goal and active search/browser policy. Each such continuation is recorded and makes the result a `resumed` run.
 - Use `high` reasoning effort by default. A different effort makes a distinct benchmark run and must be shown in its metadata.
 - Completion is the hard requirement. Wall-clock time and token use are reported as separate metrics; they are not combined into a score.
 
@@ -22,7 +22,7 @@ The game adapter never reads process memory, game assets, level definitions, sav
 
 The selected Codex home and its normal configuration remain active. Shell, local tools, apps, plugins, skills, memories, hooks, and multi-agent tools are not disabled by the harness. The shell starts in an empty `workspace-write` directory with its standard network behavior.
 
-Native web search and all Codex browser surfaces are disabled through command-line configuration. Using Shell, an app, a plugin, another MCP server, memory, or a sub-agent to retrieve external puzzle information invalidates the run. Such tool activity remains in the raw Codex event log for audit. The arena MCP server exposes only the computer-use, accounting, and explicit completion tools above.
+Native Web Search and Codex Browser Use are independent, operator-visible switches and both default to disabled. A configuration change is audited and takes effect by resuming `codex exec` on the same thread. If a run is declared no-network, using Shell, an app, a plugin, another MCP server, memory, or a sub-agent to retrieve external puzzle information invalidates it. Such tool activity remains in the raw Codex event log for audit. The optional helper-tool prompt switch merely encourages efficient local scripts, skills, and sub-agents; it does not grant a new capability or relax the game-observation boundary. The arena MCP server exposes only the computer-use, accounting, and explicit completion tools above.
 
 The arena tools are pre-approved so an unattended run never blocks on a confirmation dialog. Other tool approvals continue to follow the selected Codex configuration and the non-interactive approval policy.
 
@@ -39,6 +39,7 @@ The arena tools are pre-approved so an unattended run never blocks on a confirma
 - A stale `running` checkpoint after process death or reboot becomes immediately eligible for watchdog recovery once the user's runtime directory is available. A physical compositor is not required.
 - Suspend retains exact in-memory game state. Reboot/power loss cannot retain Wine/GPU memory; it relaunches from the durable game save and resumes the same persisted Codex thread. The next recording part begins on the last durable compositor frame, keeps that frame visible while the hidden title screen is dismissed, and switches to live pixels only after save restoration. Only the first recording contains the title page.
 - `SIGINT` creates a manual `paused` state. `SIGTERM` creates an immediately retryable state for shutdown/service restart.
+- A goal, model, reasoning, search/browser, or helper-guidance update restarts only the Codex client and resumes the same thread. It does not pause the active timer, snapshot/relaunch the game, stop the recorder or virtual camera, create a new attempt, or start a new recording part.
 - The original player saves remain in `save-backup/` throughout an incomplete run. A completed challenge archives the final challenge save and restores the originals.
 
 ## Metric boundaries
@@ -55,7 +56,7 @@ The arena tools are pre-approved so an unattended run never blocks on a confirma
 
 Every run records:
 
-- immutable run metadata and the exact neutral prompt;
+- initial run metadata, every runtime configuration change, and the exact initial/continuation prompts;
 - redacted Codex command/configuration;
 - raw `codex exec --json` events and incremental usage events;
 - dashboard/referee events and final summary;

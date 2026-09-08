@@ -36,6 +36,11 @@ test("serves the durable control page with every pre-run setting", async (contex
     "gpu-select",
     "offline-mode-toggle",
     "goal-input",
+    "web-search-toggle",
+    "browser-use-toggle",
+    "tool-guidance-toggle",
+    "web-search-badge",
+    "browser-use-badge",
     "record-toggle",
     "virtual-camera-toggle",
     "virtual-camera-select",
@@ -57,6 +62,9 @@ test("serves the durable control page with every pre-run setting", async (contex
   assert.equal(status.configuration.record, true);
   assert.equal(status.configuration.virtualCamera, false);
   assert.equal(status.configuration.offlineMode, false);
+  assert.equal(status.configuration.webSearchEnabled, false);
+  assert.equal(status.configuration.browserUseEnabled, false);
+  assert.equal(status.configuration.toolCreationGuidance, false);
   assert.equal(status.currentAccount, null);
   assert.equal(status.earliestResetAt, null);
   assert.equal(status.virtualCamera.enabled, false);
@@ -148,12 +156,12 @@ test("reports active configuration, account percentages, and earliest reset", as
   assert.equal(status.accountPool.earliestFiveHourResetAt, new Date(fiveHourReset).toISOString());
   assert.equal("home" in status.currentAccount, false);
 
-  const immutable = await fetch(`${url}/api/configuration`, {
+  const goalUpdate = await fetch(`${url}/api/configuration`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ goal: "Replace the active goal" }),
-  });
-  assert.equal(immutable.status, 409);
+  }).then((response) => response.json());
+  assert.equal(goalUpdate.accepted, true);
 
   const updated = await fetch(`${url}/api/configuration`, {
     method: "PATCH",
@@ -163,6 +171,9 @@ test("reports active configuration, account percentages, and earliest reset", as
       reasoningEffort: "xhigh",
       record: false,
       quotaWaitMs: 7_200_000,
+      webSearchEnabled: true,
+      browserUseEnabled: true,
+      toolCreationGuidance: true,
     }),
   }).then((response) => response.json());
   assert.equal(updated.accepted, true);
@@ -171,6 +182,10 @@ test("reports active configuration, account percentages, and earliest reset", as
   assert.equal(persisted.options.launchMode, "steam-offline");
   assert.equal(persisted.options.reasoningEffort, "xhigh");
   assert.equal(persisted.options.record, false);
+  assert.equal(persisted.options.goal, "Replace the active goal");
+  assert.equal(persisted.options.webSearchEnabled, true);
+  assert.equal(persisted.options.browserUseEnabled, true);
+  assert.equal(persisted.options.toolCreationGuidance, true);
 
   const firstPause = await fetch(`${url}/api/control/pause`, { method: "POST" })
     .then((response) => response.json());
@@ -186,6 +201,10 @@ test("reports active configuration, account percentages, and earliest reset", as
   assert.equal(idleStatus.configuration.launchMode, "steam-offline");
   assert.equal(idleStatus.configuration.reasoningEffort, "xhigh");
   assert.equal(idleStatus.configuration.record, false);
+  assert.equal(idleStatus.configuration.goal, "Replace the active goal");
+  assert.equal(idleStatus.configuration.webSearchEnabled, true);
+  assert.equal(idleStatus.configuration.browserUseEnabled, true);
+  assert.equal(idleStatus.configuration.toolCreationGuidance, true);
 });
 
 test("reports an API key as the current credential without OAuth percentages", async (context) => {

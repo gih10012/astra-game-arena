@@ -74,6 +74,9 @@ interface OperatorConfiguration {
   virtualCameraDevice: string;
   quotaWaitMs: number;
   accountPolicies: AccountPolicy[];
+  webSearchEnabled: boolean;
+  browserUseEnabled: boolean;
+  toolCreationGuidance: boolean;
 }
 
 interface TranscriptRecord {
@@ -356,6 +359,9 @@ export class ControlPlane {
       const launchMode = parseLaunchMode(body.launchMode, body.offlineMode);
       const accountPolicies = parseAccountPolicies(body.accountPolicies, options.accounts);
       const virtualCamera = body.virtualCamera === true;
+      const webSearchEnabled = body.webSearchEnabled === true;
+      const browserUseEnabled = body.browserUseEnabled === true;
+      const toolCreationGuidance = body.toolCreationGuidance === true;
       const virtualCameraDevice = String(
         body.virtualCameraDevice ?? options.virtualCameras[0]?.device ?? "/dev/video10",
       );
@@ -401,6 +407,9 @@ export class ControlPlane {
         virtualCameraDevice,
         openDashboard: false,
         accountPolicies,
+        webSearchEnabled,
+        browserUseEnabled,
+        toolCreationGuidance,
       });
       await writeOperatorConfiguration(this.rootDirectory, {
         version: 1,
@@ -416,6 +425,9 @@ export class ControlPlane {
         virtualCameraDevice,
         quotaWaitMs: 5 * 60 * 60_000,
         accountPolicies,
+        webSearchEnabled,
+        browserUseEnabled,
+        toolCreationGuidance,
       });
       await this.refresh();
       json(response, 202, outcome);
@@ -1005,6 +1017,10 @@ function configurationStatus(
     codexHome: configured?.codexHome ?? null,
     quotaWaitMs: configured?.quotaWaitMs ?? operator?.quotaWaitMs ?? 5 * 60 * 60_000,
     accountPolicies: configured?.accountPolicies ?? operator?.accountPolicies ?? [],
+    webSearchEnabled: configured?.webSearchEnabled ?? operator?.webSearchEnabled ?? false,
+    browserUseEnabled: configured?.browserUseEnabled ?? operator?.browserUseEnabled ?? false,
+    toolCreationGuidance:
+      configured?.toolCreationGuidance ?? operator?.toolCreationGuidance ?? false,
   };
 }
 
@@ -1054,6 +1070,10 @@ function configurationDefaults(
       operator?.virtualCameraDevice ?? virtualCameraDevice,
     quotaWaitMs: configured?.quotaWaitMs ?? operator?.quotaWaitMs ?? 5 * 60 * 60_000,
     accountPolicies: configured?.accountPolicies ?? operator?.accountPolicies ?? [],
+    webSearchEnabled: configured?.webSearchEnabled ?? operator?.webSearchEnabled ?? false,
+    browserUseEnabled: configured?.browserUseEnabled ?? operator?.browserUseEnabled ?? false,
+    toolCreationGuidance:
+      configured?.toolCreationGuidance ?? operator?.toolCreationGuidance ?? false,
   };
 }
 
@@ -1077,6 +1097,9 @@ function operatorConfigurationFromCheckpoint(
     virtualCameraDevice: configured.virtualCameraDevice,
     quotaWaitMs: configured.quotaWaitMs,
     accountPolicies: configured.accountPolicies ?? [],
+    webSearchEnabled: configured.webSearchEnabled ?? false,
+    browserUseEnabled: configured.browserUseEnabled ?? false,
+    toolCreationGuidance: configured.toolCreationGuidance ?? false,
   };
 }
 
@@ -1241,7 +1264,7 @@ function parseMutableConfiguration(
   checkpoint: RunCheckpoint,
   options: Awaited<ReturnType<typeof loadOptions>>,
 ): Partial<MutableRuntimeConfiguration> {
-  const immutable = ["game", "gameAppId", "goal", "gpuPreference"];
+  const immutable = ["game", "gameAppId", "gpuPreference"];
   for (const field of immutable) {
     if (field in body) {
       throw new HttpError(409, `${field} cannot be changed during a challenge`);
@@ -1256,6 +1279,10 @@ function parseMutableConfiguration(
     "virtualCameraDevice",
     "quotaWaitMs",
     "accountPolicies",
+    "goal",
+    "webSearchEnabled",
+    "browserUseEnabled",
+    "toolCreationGuidance",
   ]);
   const unknown = Object.keys(body).filter((field) => !allowed.has(field));
   if (unknown.length > 0) {
@@ -1266,6 +1293,13 @@ function parseMutableConfiguration(
   }
 
   const patch: Partial<MutableRuntimeConfiguration> = {};
+  if ("goal" in body) {
+    const goal = String(body.goal ?? "").trim();
+    if (goal.length < 3 || goal.length > 4_000) {
+      throw new HttpError(400, "Goal must contain 3 to 4000 characters");
+    }
+    patch.goal = goal;
+  }
   if ("model" in body) {
     const model = String(body.model ?? "");
     if (!options.models.some((entry) => entry.slug === model)) {
@@ -1302,6 +1336,18 @@ function parseMutableConfiguration(
   }
   if ("accountPolicies" in body) {
     patch.accountPolicies = parseAccountPolicies(body.accountPolicies, options.accounts);
+  }
+  if ("webSearchEnabled" in body) {
+    patch.webSearchEnabled = strictBoolean(body.webSearchEnabled, "webSearchEnabled");
+  }
+  if ("browserUseEnabled" in body) {
+    patch.browserUseEnabled = strictBoolean(body.browserUseEnabled, "browserUseEnabled");
+  }
+  if ("toolCreationGuidance" in body) {
+    patch.toolCreationGuidance = strictBoolean(
+      body.toolCreationGuidance,
+      "toolCreationGuidance",
+    );
   }
   return patch;
 }

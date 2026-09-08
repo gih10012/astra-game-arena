@@ -18,6 +18,10 @@ export type MutableRuntimeConfiguration = Pick<
   | "accountPolicies"
   | "launchMode"
   | "offlineMode"
+  | "goal"
+  | "webSearchEnabled"
+  | "browserUseEnabled"
+  | "toolCreationGuidance"
 >;
 
 export interface RuntimeConfigRequest {

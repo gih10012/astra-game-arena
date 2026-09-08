@@ -310,6 +310,9 @@ function applyConfigurationToForm(configured) {
   byId("reasoning-select").value = configured.reasoningEffort || state.options.defaults.reasoningEffort;
   byId("record-toggle").checked = configured.record !== false;
   byId("virtual-camera-toggle").checked = configured.virtualCamera === true;
+  byId("web-search-toggle").checked = configured.webSearchEnabled === true;
+  byId("browser-use-toggle").checked = configured.browserUseEnabled === true;
+  byId("tool-guidance-toggle").checked = configured.toolCreationGuidance === true;
   renderVirtualCameras(configured.virtualCameraDevice || state.options.defaults.virtualCameraDevice);
   renderAccounts(configured.accountPolicies || []);
   updateGameDetail();
@@ -325,10 +328,9 @@ function updateConfigurationMode() {
   const active = activeChallenge();
   byId("game-select").disabled = active;
   byId("gpu-select").disabled = active;
-  byId("goal-input").disabled = active;
   byId("start-button").textContent = active ? "保存并立即应用" : "从零开始挑战";
   byId("configuration-mode-note").textContent = active
-    ? "挑战运行中：目标、游戏和 GPU 已锁定；修改启动方式会自动封片并重启私有游戏运行时。"
+    ? "挑战运行中：仅游戏和 GPU 锁定；目标与 Agent 功能开关通过同线程热重载即时生效。修改启动方式会封片并重启私有游戏运行时。"
     : "";
 }
 
@@ -367,13 +369,16 @@ async function submitChallenge(event) {
       virtualCamera: byId("virtual-camera-toggle").checked,
       virtualCameraDevice: byId("virtual-camera-select").value,
       accountPolicies: accountPolicies(),
+      goal: byId("goal-input").value,
+      webSearchEnabled: byId("web-search-toggle").checked,
+      browserUseEnabled: byId("browser-use-toggle").checked,
+      toolCreationGuidance: byId("tool-guidance-toggle").checked,
     };
     const result = active
       ? await patchConfiguration(mutable)
       : await postControl("start", {
       gameAppId: byId("game-select").value,
       gpuPreference: byId("gpu-select").value,
-      goal: byId("goal-input").value,
       ...mutable,
     });
     const deferred = result?.acknowledgement?.deferredFields || [];
@@ -418,6 +423,19 @@ async function refreshSupervisor() {
     byId("weekly").textContent = apiKeyActive
       ? "OAUTH POOL INACTIVE"
       : quotaText(active?.secondary, active?.reserveWeeklyPercent);
+    const configured = state.supervisor.checkpoint?.options || state.options?.defaults || {};
+    updateCapabilityBadge(
+      "web-search-badge",
+      "web-search-state",
+      configured.webSearchEnabled === true,
+      "WEB SEARCH",
+    );
+    updateCapabilityBadge(
+      "browser-use-badge",
+      "browser-use-state",
+      configured.browserUseEnabled === true,
+      "BROWSER",
+    );
     const checkpoint = state.supervisor.checkpoint;
     byId("next-action").textContent = checkpoint?.retryAt ? `resume ${new Date(checkpoint.retryAt).toLocaleString()}` : checkpoint?.reason || "ready";
     byId("video-parts").textContent = String(state.supervisor.recording?.parts || 0);
@@ -434,6 +452,11 @@ async function refreshSupervisor() {
   } catch {
     byId("daemon-state").textContent = "RECONNECTING";
   }
+}
+
+function updateCapabilityBadge(badgeId, stateId, enabled, label) {
+  byId(badgeId).classList.toggle("safe", !enabled);
+  byId(stateId).textContent = `${label} ${enabled ? "LIVE" : "OFF"}`;
 }
 
 function quotaText(window, reserve) {
