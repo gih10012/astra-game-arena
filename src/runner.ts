@@ -20,9 +20,17 @@ import {
 } from "./account-pool.js";
 import { ChallengeState } from "./challenge-state.js";
 import {
+  apiKeyRuntimeHome,
+  CHATGPT_POOL_CREDENTIAL,
   CODEX_COMMAND,
   codexEnvironment,
+  credentialAfterModelChange,
   displayCodexHome,
+  isHistoricalUnsupportedChatGptModel,
+  isChatGptModelUnsupportedError,
+  prepareApiKeyRuntimeHome,
+  publicApiKeyCredential,
+  resolveApiKeyCredential,
   resolveCodexHome,
 } from "./codex-home.js";
 import {
@@ -43,13 +51,18 @@ import {
   type VirtualGameRuntime,
 } from "./headless-display.js";
 import {
+  recordingPairIsActive,
   recoverRecordingPairs,
   startRecordingPair,
   stopAndComposeRecordingPair,
   type ActiveRecordingPair,
 } from "./recording-pair.js";
 import { RolloutTailer } from "./rollout-tailer.js";
-import { assembleRecordings, type RecordingAssembly } from "./recording-assembly.js";
+import {
+  assembleRecordings,
+  recordingTimingReconciliation,
+  type RecordingAssembly,
+} from "./recording-assembly.js";
 import {
   CheckpointStore,
   checkpointPath,
@@ -60,6 +73,7 @@ import {
   type RunCheckpoint,
   type RunPhase,
   type AccountPolicy,
+  type CodexCredentialState,
 } from "./run-checkpoint.js";
 import {
   readRuntimeMediaState,
@@ -126,6 +140,8 @@ export interface RunOutcome {
   retryAt: string | null;
   reason: string | null;
 }
+
+type RequestedAttemptStop = "pause" | "restart" | "game-exit";
 
 export async function runChallenge(options: RunOptions): Promise<RunOutcome> {
   const checkpoint = await initializeChallenge(options, false);
@@ -200,6 +216,7 @@ async function initializeChallenge(
     progress: { total: 0, unlocked: 0, completed: 0 },
     recordings: [],
     recordingPairs: [],
+    credential: CHATGPT_POOL_CREDENTIAL,
     options: persistedOptions,
   };
   const audit = new AuditLog(runDirectory);
@@ -219,7 +236,7 @@ async function initializeChallenge(
     actionPolicy: "isolated-keyboard-and-mouse",
     webSearch: "disabled",
     networkBrowser: "disabled",
-    shellNetwork: "disabled",
+    shellNetwork: "standard",
     standardCodexCapabilities: true,
     codexLauncher: CODEX_COMMAND,
     codexHome: displayCodexHome(codexHome),
@@ -314,7 +331,7 @@ export async function cancelChallenge(runDirectory: string): Promise<RunOutcome>
 }
 
 async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome> {
-  const prior = checkpointStore.snapshot();
+  let prior = checkpointStore.snapshot();
   let attempt = prior.attempt + 1;
   const initialPart = String(attempt).padStart(4, "0");
   const runDirectory = prior.runDirectory;
@@ -344,6 +361,22 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     for (const warning of recovered.warnings) {
       await audit.append("recording.recovery.warning", warning);
     }
+    if (prior.attempt > 0 && checkpointStore.snapshot().recordings.length > 0) {
+      try {
+        const assembly = await assembleRecordings(runDirectory);
+        const reconciliation = recordingTimingReconciliation(
+          checkpointStore.snapshot(),
+          assembly,
+        );
+        if (reconciliation) {
+          await checkpointStore.update({ elapsedMs: reconciliation.afterElapsedMs });
+          prior = checkpointStore.snapshot();
+          await audit.append("timing.reconciled", reconciliation);
+        }
+      } catch (error) {
+        await audit.append("timing.reconciliation.warning", String(error));
+      }
+    }
   }
   const state = new ChallengeState(
     prior.options.model ?? "gpt-6-astra",
@@ -356,6 +389,36 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   const saveGuard = new SaveGuard(paths.saveDirectory, runDirectory);
   const codexHome = prior.options.codexHome;
   const primaryCodexHome = codexHome ?? path.join(os.homedir(), ".codex");
+  let apiKeyCredential = await resolveApiKeyCredential();
+  let credential: CodexCredentialState =
+    prior.credential?.mode === "api-key" && apiKeyCredential
+      ? publicApiKeyCredential(apiKeyCredential)
+      : { ...CHATGPT_POOL_CREDENTIAL };
+  const configuredModel = prior.options.model ?? "gpt-6-astra";
+  const restoredApiKeyFallback =
+    credential.mode === "chatgpt-pool" &&
+    apiKeyCredential !== null &&
+    await hasHistoricalUnsupportedChatGptModel(runDirectory, configuredModel);
+  if (restoredApiKeyFallback && apiKeyCredential) {
+    credential = publicApiKeyCredential(apiKeyCredential);
+  }
+  const apiKeyHome = apiKeyRuntimeHome();
+  let apiKeyHomePrepared = false;
+  const prepareApiKeyHome = async (): Promise<string> => {
+    apiKeyCredential ??= await resolveApiKeyCredential();
+    if (!apiKeyCredential) {
+      throw new Error("No configured API-key credential is available");
+    }
+    if (!apiKeyHomePrepared) {
+      await prepareApiKeyRuntimeHome(apiKeyCredential, apiKeyHome, [
+        rootDirectory,
+        runDirectory,
+      ]);
+      apiKeyHomePrepared = true;
+    }
+    return apiKeyHome;
+  };
+  if (credential.mode === "api-key") await prepareApiKeyHome();
   let accountProfiles = await discoverCodexAccounts();
   await Promise.all(
     accountProfiles.map((profile) =>
@@ -372,8 +435,18 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     pidStartTicks: processStartTicks(),
     retryAt: null,
     reason: null,
+    credential,
   });
   await audit.append("attempt.started", { attempt, resumed: attempt > 1 });
+  if (restoredApiKeyFallback) {
+    await audit.append("credential.fallback.restored", {
+      attempt,
+      mode: credential.mode,
+      provider: credential.provider,
+      label: credential.label,
+      reason: "persisted-chatgpt-model-unsupported-diagnostic",
+    });
+  }
 
   let codex: ChildProcess | null = null;
   let recorder: ActiveRecordingPair | null = null;
@@ -406,11 +479,13 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let accountRotationRequested = false;
   let configurationRestartRequested = false;
   let configurationRestartAwaitingThread = false;
+  let recordingFailureRequested = false;
   let runtimeConfigBusy = false;
   let runtimeConfigGeneration = 0;
   let quotaFallbackStartedAtMs: number | null = null;
+  let unsupportedChatGptModel: string | null = null;
   let exitDescription = "Codex exited before completion";
-  let requestedStop: "pause" | "restart" | "game-exit" | null = null;
+  let requestedStop: RequestedAttemptStop | null = null;
   let powerPauseRequested = false;
   let lastPowerState: PowerState | null = null;
   let powerPauseReason = "Low battery; snapshot saved until wake or external power";
@@ -463,6 +538,20 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     virtualCameraError: null,
   });
 
+  const stopCodex = () => {
+    const activeCodex = codex;
+    if (activeCodex?.exitCode !== null || !activeCodex.pid) return;
+    signalProcessGroup(activeCodex, "SIGINT");
+    const terminate = setTimeout(() => {
+      if (activeCodex.exitCode === null) signalProcessGroup(activeCodex, "SIGTERM");
+    }, 2_000);
+    const kill = setTimeout(() => {
+      if (activeCodex.exitCode === null) signalProcessGroup(activeCodex, "SIGKILL");
+    }, 5_000);
+    terminate.unref();
+    kill.unref();
+  };
+
   const stopRecordingUnlocked = async () => {
     const activeRecorder = recorder;
     recorder = null;
@@ -497,6 +586,29 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     }
   };
 
+  const stopForRecordingFailure = (
+    failedAttempt: number,
+    message: string,
+    failedRecorder: ActiveRecordingPair | null,
+  ) => {
+    if (failedRecorder) failedRecorder.stopping = true;
+    if (requestedStop === null) {
+      recordingFailureRequested = true;
+      exitDescription = `Recording coverage failed: ${message}`;
+    }
+    interruptActiveTiming(state, () => {
+      controller?.cancelPendingActions();
+      stopCodex();
+    });
+    void withMediaOperation(async () => {
+      if (failedRecorder && recorder !== failedRecorder) return;
+      await stopRecordingUnlocked().catch(() => undefined);
+      await updateMediaState({ recordingActive: false, recordingError: message });
+      await audit.append("recording.failed", { attempt: failedAttempt, message });
+      controller?.publishTranscript({ type: "runner.error", message });
+    });
+  };
+
   const startRecordingUnlocked = async (
     currentAttempt: number,
     configured: RunCheckpoint["options"],
@@ -512,7 +624,6 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       "recordings",
       `challenge-part-${currentPart}.mkv`,
     );
-    const captureStartedAt = new Date().toISOString();
     let started: ActiveRecordingPair | null = null;
     try {
       started = await startRecordingPair({
@@ -522,12 +633,17 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         dashboard: virtualDashboard,
         audit,
         onUnexpectedExit: (message) => {
+          if (!started || recorder !== started || started.stopping) return;
+          const recordingRequired = checkpointStore.snapshot().options.record;
+          if (recordingRequired) {
+            stopForRecordingFailure(currentAttempt, message, started);
+            return;
+          }
+          started.stopping = true;
           void withMediaOperation(async () => {
             if (recorder !== started) return;
             await stopRecordingUnlocked().catch(() => undefined);
             await updateMediaState({ recordingActive: false, recordingError: message });
-            await audit.append("recording.failed", { attempt: currentAttempt, message });
-            controller?.publishTranscript({ type: "runner.error", message });
           });
         },
       });
@@ -553,7 +669,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       dimensions: "1920x1080",
       framesPerSecond: 30,
       timestampMode: "frame-count",
-      captureStartedAt,
+      captureStartedAt: started.captureStartedAt,
       snapshot: state.snapshot(),
       filename: recordingRelative,
     });
@@ -661,6 +777,60 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         allowStopped,
       )
     );
+  const activateAttemptTiming = (
+    mode: "start" | "resume",
+    currentAttempt: number,
+  ): { activeStartedAt: string; activeStartedElapsedMs: number } | null => {
+    const configured = checkpointStore.snapshot().options;
+    const candidate = recorder;
+    const activeRecorder = recordingPairIsActive(candidate, currentAttempt)
+      ? candidate
+      : null;
+    if (
+      requestedStop === null &&
+      !recordingFailureRequested &&
+      configured.record &&
+      !activeRecorder
+    ) {
+      stopForRecordingFailure(
+        currentAttempt,
+        `Attempt ${currentAttempt} cannot become active without both recorder processes`,
+        candidate,
+      );
+    }
+    const initialCaptureBoundary = mode === "start" && configured.record
+      ? activeRecorder
+      : null;
+    const nowWall = initialCaptureBoundary?.captureStartedWallMs ?? Date.now();
+    const nowMono = initialCaptureBoundary?.captureStartedMono ?? process.hrtime.bigint();
+    const activeStartedElapsedMs = mode === "start"
+      ? prior.elapsedMs
+      : state.timeSnapshot(nowWall, nowMono).elapsedMs;
+    const activated = activateTimedAttempt({
+      stopRequested: requestedStop !== null || recordingFailureRequested,
+      recordingRequired: configured.record,
+      recordingActive: activeRecorder !== null,
+      activate: () => {
+        if (mode === "start") {
+          state.start(prior.runId, nowWall, nowMono, {
+            elapsedMs: prior.elapsedMs,
+            startedAt: prior.startedAt,
+            tokens: prior.tokens,
+            providerTokenCursor: prior.tokenCursor ?? prior.tokens,
+            progress: prior.progress,
+          });
+        } else {
+          state.resume(currentAttempt, nowWall, nowMono);
+        }
+      },
+    });
+    return activated
+      ? {
+          activeStartedAt: new Date(nowWall).toISOString(),
+          activeStartedElapsedMs,
+        }
+      : null;
+  };
   const reconcileMedia = async (
     configured: RunCheckpoint["options"],
     currentAttempt: number,
@@ -694,12 +864,55 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   };
 
   const inspectDiagnostic = (text: string) => {
+    if (
+      credential.mode === "chatgpt-pool" &&
+      isChatGptModelUnsupportedError(text)
+    ) {
+      unsupportedChatGptModel =
+        checkpointStore.snapshot().options.model ?? "gpt-6-astra";
+    }
     if (!isQuotaError(text)) return;
     quotaExhausted = true;
     const resetAt = extractQuotaResetAtFromText(text);
     if (resetAt !== null && resetAt > Date.now()) {
       quotaResetAtMs = Math.max(quotaResetAtMs ?? 0, resetAt);
     }
+  };
+  const activateApiKeyFallback = async (): Promise<boolean> => {
+    const configuredModel =
+      checkpointStore.snapshot().options.model ?? "gpt-6-astra";
+    if (
+      credential.mode !== "chatgpt-pool" ||
+      unsupportedChatGptModel !== configuredModel
+    ) {
+      return false;
+    }
+    apiKeyCredential = await resolveApiKeyCredential();
+    if (!apiKeyCredential) return false;
+    await prepareApiKeyHome();
+    const fallbackCredential = publicApiKeyCredential(apiKeyCredential);
+    quotaExhausted = false;
+    quotaResetAtMs = null;
+    reservePauseRequested = false;
+    accountRotationRequested = false;
+    configurationRestartRequested = true;
+    exitDescription = `The selected model requires ${fallbackCredential.label}`;
+    await checkpointStore.update({ credential: fallbackCredential });
+    credential = fallbackCredential;
+    await audit.append("credential.fallback", {
+      attempt,
+      mode: credential.mode,
+      provider: credential.provider,
+      label: credential.label,
+      reason: "chatgpt-model-unsupported",
+    });
+    controller?.publishTranscript({
+      type: "runner.credential_fallback",
+      provider: credential.provider,
+      label: credential.label,
+      message: `ChatGPT does not support this model; continuing the same thread with ${credential.label}.`,
+    });
+    return true;
   };
   const inspectEvent = async (event: unknown) => {
     const resetAt = extractQuotaResetAt(event);
@@ -723,19 +936,6 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         stopCodex();
       }
     }
-  };
-  const stopCodex = () => {
-    const activeCodex = codex;
-    if (activeCodex?.exitCode !== null || !activeCodex.pid) return;
-    signalProcessGroup(activeCodex, "SIGINT");
-    const terminate = setTimeout(() => {
-      if (activeCodex.exitCode === null) signalProcessGroup(activeCodex, "SIGTERM");
-    }, 2_000);
-    const kill = setTimeout(() => {
-      if (activeCodex.exitCode === null) signalProcessGroup(activeCodex, "SIGKILL");
-    }, 5_000);
-    terminate.unref();
-    kill.unref();
   };
   const stopCodexAfterThreadSaved = () => {
     if (!codex || codex.exitCode !== null) return;
@@ -769,6 +969,13 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       if (!request) return;
       previous = checkpointStore.snapshot().options;
       const next = { ...previous, ...request.patch };
+      const modelChanged = request.patch.model !== undefined &&
+        request.patch.model !== previous.model;
+      const nextCredential = credentialAfterModelChange(
+        credential,
+        previous.model,
+        request.patch.model,
+      );
 
       if (request.patch.accountPolicies) {
         const refreshedProfiles = await discoverCodexAccounts();
@@ -812,7 +1019,12 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         runtimeConfigGeneration += 1;
       }
 
-      if (accountsReconfigured && state.snapshot().status !== "running" && accountPool) {
+      if (
+        accountsReconfigured &&
+        credential.mode === "chatgpt-pool" &&
+        state.snapshot().status !== "running" &&
+        accountPool
+      ) {
         const choice = accountPool.choose();
         await accountPool.persist();
         if (choice.account && outcomePhase === "waiting_quota") {
@@ -822,17 +1034,30 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         }
       }
 
+      if (
+        modelChanged &&
+        credential.mode === "api-key" &&
+        state.snapshot().status !== "running"
+      ) {
+        nextRetryAt = new Date().toISOString();
+        retryAt = nextRetryAt;
+        runtimeConfigGeneration += 1;
+      }
+
       await checkpointStore.update({
         options: next,
+        credential: nextCredential,
         ...(nextRetryAt !== checkpointStore.snapshot().retryAt
           ? { retryAt: nextRetryAt }
           : {}),
       });
       configurationCommitted = true;
+      credential = nextCredential;
+      if (modelChanged) unsupportedChatGptModel = null;
       state.setModel(next.model ?? "gpt-6-astra");
 
       let restartCodex = codex !== null && (
-        (request.patch.model !== undefined && request.patch.model !== previous.model) ||
+        modelChanged ||
         (request.patch.reasoningEffort !== undefined &&
           request.patch.reasoningEffort !== previous.reasoningEffort)
       );
@@ -981,15 +1206,21 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   };
   const onInterrupt = () => {
     requestedStop = "pause";
+    exitDescription = "Paused by SIGINT";
     startupAbortController.abort();
-    controller?.cancelPendingActions();
-    stopCodex();
+    interruptActiveTiming(state, () => {
+      controller?.cancelPendingActions();
+      stopCodex();
+    });
   };
   const onTerminate = () => {
     requestedStop = "restart";
+    exitDescription = "Interrupted by shutdown or service restart";
     startupAbortController.abort();
-    controller?.cancelPendingActions();
-    stopCodex();
+    interruptActiveTiming(state, () => {
+      controller?.cancelPendingActions();
+      stopCodex();
+    });
   };
   process.once("SIGINT", onInterrupt);
   process.once("SIGTERM", onTerminate);
@@ -1090,6 +1321,10 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         return {
           active: true,
           checkpoint,
+          currentCredential: currentCredentialStatus(
+            checkpoint.credential,
+            accountPool?.snapshot() ?? null,
+          ),
           accountPool: accountPool?.snapshot() ?? null,
           recording: {
             enabled: checkpoint.options.record,
@@ -1148,11 +1383,16 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
 
     await startCameraOutput(true);
 
+    let activationBoundary: {
+      activeStartedAt: string;
+      activeStartedElapsedMs: number;
+    } | null;
     if (isColdResume) {
       const restoredFrame = await activeGame.capture();
       activeController.publishFrame(restoredFrame);
       await startRecording(attempt, true);
-      state.resume(attempt);
+      activationBoundary = activateAttemptTiming("resume", attempt);
+      if (!activationBoundary) throw new Error(exitDescription);
       await audit.append("runtime.snapshot.restored", {
         attempt,
         method: "durable-save-and-codex-thread",
@@ -1161,14 +1401,9 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         titleVisibleInRecording: false,
       });
     } else {
-      state.start(prior.runId, Date.now(), process.hrtime.bigint(), {
-        elapsedMs: prior.elapsedMs,
-        startedAt: prior.startedAt,
-        tokens: prior.tokens,
-        providerTokenCursor: prior.tokenCursor ?? prior.tokens,
-        progress: prior.progress,
-      });
-      await startRecording(attempt);
+      await startRecording(attempt, true);
+      activationBoundary = activateAttemptTiming("start", attempt);
+      if (!activationBoundary) throw new Error(exitDescription);
     }
     const finishPromise = once(state, "finished").then(
       ([snapshot]) => snapshot as ReturnType<ChallengeState["snapshot"]>,
@@ -1180,6 +1415,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     await audit.append(attempt === 1 ? "challenge.started" : "challenge.resumed", {
       attempt,
       threadId: prior.threadId,
+      ...activationBoundary,
       snapshot: state.snapshot(),
     });
     const liveProgress = isParabox
@@ -1254,10 +1490,13 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         configurationRestartRequested = false;
         configurationRestartAwaitingThread = false;
         quotaFallbackStartedAtMs = null;
+        unsupportedChatGptModel = null;
         activeAccountId = null;
         exitDescription = "Codex exited before completion";
         let activeCodexHome = codexHome;
-        if (accountPool && !powerPauseRequested) {
+        if (credential.mode === "api-key" && !powerPauseRequested) {
+          activeCodexHome = await prepareApiKeyHome();
+        } else if (accountPool && !powerPauseRequested) {
           const choice = accountPool.choose();
           await accountPool.persist();
           if (choice.account) {
@@ -1281,7 +1520,10 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             exitDescription = "No account is currently eligible under the configured reserve limits";
           }
         }
-        if (!powerPauseRequested && (!accountPool || activeAccountId)) {
+        if (
+          !powerPauseRequested &&
+          (credential.mode === "api-key" || !accountPool || activeAccountId)
+        ) {
           const part = String(attempt).padStart(4, "0");
           const currentThreadId = checkpointStore.snapshot().threadId;
           const currentOptions = checkpointStore.snapshot().options;
@@ -1289,7 +1531,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             await ensureCodexThreadInBase(
               currentThreadId,
               primaryCodexHome,
-              accountProfiles,
+              [...accountProfiles, { home: apiKeyHome }],
             );
           }
           const args = codexArguments({
@@ -1298,6 +1540,9 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             controlToken: activeController.controlToken,
             reasoningEffort: currentOptions.reasoningEffort,
             model: currentOptions.model ?? "gpt-6-astra",
+            ...(credential.mode === "api-key"
+              ? { modelProvider: credential.provider }
+              : {}),
             prompt: currentThreadId
               ? RESUME_PROMPT
               : initialPrompt(currentOptions.goal ?? DEFAULT_GOAL, selectedGame.name),
@@ -1360,6 +1605,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
                     path.join(activeCodexHome ?? primaryCodexHome, "sessions"),
                     path.join(primaryCodexHome, "sessions"),
                     path.join(os.homedir(), ".codex", "sessions"),
+                    path.join(apiKeyHome, "sessions"),
                     ...accountProfiles.map((profile) => path.join(profile.home, "sessions")),
                   ],
                   codexStartedAtMs,
@@ -1388,10 +1634,15 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
               .finally(() => eventTasks.delete(task));
           });
 
-          const exitPromise = once(activeCodex, "exit").then(([code, signal]) => ({
-            code: typeof code === "number" ? code : null,
-            signal: typeof signal === "string" ? signal : null,
-          }));
+          let codexExitedWhileRunning = false;
+          const exitPromise = once(activeCodex, "exit").then(([code, signal]) => {
+            codexExitedWhileRunning = state.snapshot().status === "running";
+            interruptActiveTiming(state, () => undefined);
+            return {
+              code: typeof code === "number" ? code : null,
+              signal: typeof signal === "string" ? signal : null,
+            };
+          });
           void exitPromise.then((exit) => {
             activeController.publishTranscript({
               type: "process.exited",
@@ -1405,7 +1656,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           ]);
           if (
             first.type === "exit" &&
-            state.snapshot().status === "running" &&
+            codexExitedWhileRunning &&
             !reservePauseRequested &&
             !accountRotationRequested &&
             !configurationRestartRequested
@@ -1425,6 +1676,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             await Promise.race([exitPromise, delay(5_000)]);
           }
           await Promise.allSettled([...eventTasks]);
+          await activateApiKeyFallback();
           codex = null;
         }
         if (state.snapshot().status !== "completed") state.pause();
@@ -1477,13 +1729,16 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           quotaResetAtMs = quotaFallbackStartedAtMs +
             checkpointStore.snapshot().options.quotaWaitMs;
         }
+        const recordingRetry = recordingFailureRequested
+          ? recordingFailureOutcome(attempt, exitDescription)
+          : null;
         outcomePhase = powerPauseRequested
           ? "waiting_power"
           : rotateAccountImmediately
             ? "waiting_retry"
           : quotaExhausted
             ? "waiting_quota"
-            : "waiting_retry";
+            : recordingRetry?.phase ?? "waiting_retry";
         retryAt = powerPauseRequested
           ? null
           : rotateAccountImmediately
@@ -1494,14 +1749,15 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
                 checkpointStore.snapshot().options.quotaWaitMs,
                 quotaResetAtMs,
               )
-            : new Date(Date.now() + retryDelayMs(attempt)).toISOString();
+            : recordingRetry?.retryAt ??
+              new Date(Date.now() + retryDelayMs(attempt)).toISOString();
         reason = powerPauseRequested
           ? powerPauseReason
           : rotateAccountImmediately
             ? configurationRestartRequested
               ? "Applying updated model configuration"
               : "Switching to another eligible Codex account"
-            : exitDescription;
+            : recordingRetry?.reason ?? exitDescription;
         const waitingSnapshot = state.snapshot();
         await checkpointStore.update({
           phase: outcomePhase,
@@ -1520,6 +1776,8 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           retryAt,
           reason,
           runtimePreserved: true,
+          activeEndedAt: waitingSnapshot.time.endedAt,
+          activeEndedElapsedMs: waitingSnapshot.time.elapsedMs,
           snapshot: waitingSnapshot,
         });
         if (checkpointStore.snapshot().recordings.length > 0 || checkpointStore.snapshot().options.record) {
@@ -1575,14 +1833,18 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         if (requestedStop !== null) break;
         const resumedFromPower = powerPauseRequested;
         powerPauseRequested = false;
+        recordingFailureRequested = false;
         attempt += 1;
+        retryAt = null;
+        reason = null;
         const resumedOptions = checkpointStore.snapshot().options;
         if (resumedOptions.record || resumedOptions.virtualCamera) {
           await ensureVirtualDashboard();
         }
         await startRecording(attempt, true);
         await startCameraOutput(true);
-        state.resume(attempt);
+        const resumedBoundary = activateAttemptTiming("resume", attempt);
+        if (!resumedBoundary) break;
         retryAt = null;
         reason = null;
         await checkpointStore.update({
@@ -1597,6 +1859,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           attempt,
           threadId: checkpointStore.snapshot().threadId,
           method: "preserved-live-runtime",
+          ...resumedBoundary,
           snapshot: state.snapshot(),
         });
         activeController.publishTranscript({
@@ -1651,7 +1914,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       try {
         await operation();
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = cleanupErrorText(error);
         cleanupFailures.push(`${component}: ${message}`);
         await audit.append("cleanup.warning", { component, message }).catch(() => undefined);
       }
@@ -1684,6 +1947,10 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         try {
           await virtualGame!.close();
         } catch (firstError) {
+          await audit.append("cleanup.retry", {
+            component: "virtual game",
+            message: cleanupErrorText(firstError),
+          }).catch(() => undefined);
           await delay(250);
           try {
             await virtualGame!.close();
@@ -1703,14 +1970,15 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         await audit.append("checkpoint.save.warning", String(error));
       });
     }
-    if (cleanupFailures.length > 0) {
-      const cleanupReason = `Cleanup incomplete: ${cleanupFailures.join("; ")}`;
-      reason = reason ? `${reason}; ${cleanupReason}` : cleanupReason;
-      if (outcomePhase === "completed") {
-        outcomePhase = "failed";
-        retryAt = null;
-      }
-    }
+    const cleanedOutcome = outcomeAfterCleanup(
+      outcomePhase,
+      retryAt,
+      reason,
+      cleanupFailures,
+    );
+    outcomePhase = cleanedOutcome.phase;
+    retryAt = cleanedOutcome.retryAt;
+    reason = cleanedOutcome.reason;
     const snapshot = state.snapshot();
     const attemptStarted = snapshot.status !== "idle";
     const checkpointPhase =
@@ -1740,6 +2008,8 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       phase: outcomePhase,
       retryAt,
       reason,
+      activeEndedAt: snapshot.time.endedAt,
+      activeEndedElapsedMs: snapshot.time.elapsedMs,
       snapshot,
     });
     if (outcomePhase === "completed" && prior.options.isolateSaves && isParabox) {
@@ -1786,12 +2056,85 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   };
 }
 
+export function cleanupErrorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof AggregateError) || error.errors.length === 0) return message;
+  return `${message}: ${error.errors.map(cleanupErrorText).join("; ")}`;
+}
+
+export function interruptActiveTiming(
+  state: ChallengeState,
+  interrupt: () => void,
+  nowWall = Date.now(),
+  nowMono = process.hrtime.bigint(),
+): void {
+  state.pause(nowWall, nowMono);
+  interrupt();
+}
+
+export function activateTimedAttempt(options: {
+  stopRequested: boolean;
+  recordingRequired: boolean;
+  recordingActive: boolean;
+  activate: () => void;
+}): boolean {
+  if (
+    options.stopRequested ||
+    (options.recordingRequired && !options.recordingActive)
+  ) return false;
+  options.activate();
+  return true;
+}
+
+export function recordingFailureOutcome(
+  attempt: number,
+  reason: string,
+  nowMs = Date.now(),
+): { phase: "waiting_retry"; retryAt: string; reason: string } {
+  return {
+    phase: "waiting_retry",
+    retryAt: new Date(nowMs + retryDelayMs(attempt)).toISOString(),
+    reason,
+  };
+}
+
+export function outcomeAfterCleanup(
+  phase: RunPhase,
+  retryAt: string | null,
+  reason: string | null,
+  failures: readonly string[],
+): { phase: RunPhase; retryAt: string | null; reason: string | null } {
+  if (failures.length === 0) return { phase, retryAt, reason };
+  const cleanupReason = `Cleanup incomplete: ${failures.join("; ")}`;
+  return {
+    phase: phase === "completed" ? "failed" : phase,
+    retryAt: phase === "completed" ? null : retryAt,
+    reason: reason ? `${reason}; ${cleanupReason}` : cleanupReason,
+  };
+}
+
+export function currentCredentialStatus(
+  credential: CodexCredentialState | null | undefined,
+  accountPool: { activeAccountId: string | null; accounts: Array<{ id: string; email: string }> } | null,
+): CodexCredentialState {
+  const current = credential ?? CHATGPT_POOL_CREDENTIAL;
+  if (current.mode === "api-key") return { ...current };
+  const active = accountPool?.accounts.find(
+    (account) => account.id === accountPool.activeAccountId,
+  );
+  return {
+    ...current,
+    label: active?.email ?? current.label,
+  };
+}
+
 export function codexArguments(options: {
   mcpEntry: string;
   arenaUrl: string;
   controlToken: string;
   reasoningEffort: string;
   model?: string;
+  modelProvider?: string;
   prompt?: string;
   resumeThreadId?: string;
 }): string[] {
@@ -1807,13 +2150,15 @@ export function codexArguments(options: {
     "workspace-write",
     "--skip-git-repo-check",
     ...config("approval_policy", '"never"'),
-    ...config("sandbox_workspace_write.network_access", "false"),
     ...config("web_search", '"disabled"'),
     ...config("tools.web_search", "false"),
     ...config("features.browser_use", "false"),
     ...config("features.browser_use_external", "false"),
     ...config("features.in_app_browser", "false"),
     ...config("model_reasoning_effort", `"${options.reasoningEffort}"`),
+    ...(options.modelProvider
+      ? config("model_provider", JSON.stringify(options.modelProvider))
+      : []),
     ...config("mcp_servers.game.command", '"node"'),
     ...config("mcp_servers.game.args", JSON.stringify([options.mcpEntry])),
     ...config(
@@ -1843,6 +2188,33 @@ export function codexArguments(options: {
         options.prompt ?? RESUME_PROMPT,
       ]
     : [...common, options.prompt ?? initialPrompt(DEFAULT_GOAL, "Patrick's Parabox")];
+}
+
+export async function hasHistoricalUnsupportedChatGptModel(
+  runDirectory: string,
+  model: string,
+): Promise<boolean> {
+  const filenames = [path.join(runDirectory, "codex-exec.jsonl")];
+  try {
+    const entries = await readdir(runDirectory);
+    filenames.push(
+      ...entries
+        .filter((entry) => /^codex-stderr-part-\d+\.log$/.test(entry))
+        .map((entry) => path.join(runDirectory, entry)),
+    );
+  } catch {
+    // A missing run directory has no persisted diagnostic.
+  }
+  for (const filename of filenames) {
+    try {
+      if (isHistoricalUnsupportedChatGptModel(await readFile(filename, "utf8"), model)) {
+        return true;
+      }
+    } catch {
+      // Missing or unreadable diagnostics do not force a credential change.
+    }
+  }
+  return false;
 }
 
 function initialPrompt(goal: string, gameName: string): string {

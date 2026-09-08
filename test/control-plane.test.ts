@@ -188,6 +188,69 @@ test("reports active configuration, account percentages, and earliest reset", as
   assert.equal(idleStatus.configuration.record, false);
 });
 
+test("reports an API key as the current credential without OAuth percentages", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "game-arena-api-credential-"));
+  const runDirectory = path.join(root, "runs", "api-credential-run");
+  const checkpoint = testCheckpoint(root, runDirectory, {
+    credential: {
+      mode: "api-key",
+      provider: "custom",
+      label: "custom API key",
+    },
+  });
+  await new CheckpointStore(checkpointPath(runDirectory), checkpoint).update({});
+  await registerActiveRun(root, runDirectory);
+  await durableJsonWrite(path.join(runDirectory, "account-pool.json"), {
+    version: 1,
+    activeAccountId: "inactive-oauth-account",
+    accounts: [{
+      id: "inactive-oauth-account",
+      email: "inactive@example.test",
+      home: "/private/oauth-account",
+      reserveFiveHourPercent: 35,
+      reserveWeeklyPercent: 20,
+      primary: { usedPercent: 62, resetsAtMs: Date.now() + 60_000 },
+      secondary: { usedPercent: 45, resetsAtMs: Date.now() + 120_000 },
+      blockedUntilMs: null,
+      lastPrimaryResetAtMs: null,
+      updatedAt: new Date().toISOString(),
+    }],
+  });
+
+  const control = new ControlPlane(root, { port: 0 });
+  const url = await control.listen();
+  context.after(() => control.close());
+
+  const status = await fetch(`${url}/api/status`).then((response) => response.json());
+  assert.deepEqual(status.currentCredential, {
+    mode: "api-key",
+    provider: "custom",
+    label: "custom API key",
+  });
+  assert.equal(status.currentAccount, null);
+  assert.equal(status.earliestResetAt, null);
+  assert.equal(status.accountPool.schedulingActive, false);
+  assert.equal(status.accountPool.activeAccountId, null);
+  assert.equal(status.accountPool.accounts[0].reserveFiveHourPercent, 35);
+  assert.equal(status.accountPool.accounts[0].fiveHour.usedPercent, 62);
+  assert.equal("home" in status.currentCredential, false);
+
+  const supervisor = await fetch(`${url}/api/supervisor`)
+    .then((response) => response.json());
+  assert.deepEqual(supervisor.currentCredential, status.currentCredential);
+
+  const updated = await fetch(`${url}/api/configuration`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accountPolicies: [] }),
+  }).then((response) => response.json());
+  assert.equal(updated.accepted, true);
+  assert.deepEqual(
+    (await CheckpointStore.load(runDirectory)).snapshot().credential,
+    status.currentCredential,
+  );
+});
+
 test("routes waiting live runners through request acknowledgements and reports actual media", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "game-arena-live-config-"));
   const runDirectory = path.join(root, "runs", "live-config-run");

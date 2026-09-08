@@ -7,6 +7,7 @@ import {
   CheckpointStore,
   checkpointPath,
   clearActiveRun,
+  normalizeCodexCredential,
   processMatches,
   processStartTicks,
   readActiveRun,
@@ -64,6 +65,11 @@ test("durably tracks an active resumable run", async () => {
   const loaded = await CheckpointStore.load(runDirectory);
   assert.equal(loaded.snapshot().phase, "waiting_quota");
   assert.equal(loaded.snapshot().elapsedMs, 1234);
+  assert.deepEqual(loaded.snapshot().credential, {
+    mode: "chatgpt-pool",
+    provider: "openai",
+    label: "ChatGPT account pool",
+  });
 
   const renamedRoot = `${root}-renamed`;
   await rename(root, renamedRoot);
@@ -75,6 +81,23 @@ test("durably tracks an active resumable run", async () => {
 
   await clearActiveRun(renamedRoot, relocatedRun);
   assert.equal(await readActiveRun(renamedRoot), null);
+});
+
+test("sanitizes persisted API-key credential metadata", () => {
+  const credential = normalizeCodexCredential({
+    mode: "api-key",
+    provider: "custom",
+    label: "custom API key",
+    home: "/private/runtime/home",
+    OPENAI_API_KEY: "sk-must-not-persist",
+  });
+  assert.deepEqual(credential, {
+    mode: "api-key",
+    provider: "custom",
+    label: "custom API key",
+  });
+  assert.equal(JSON.stringify(credential).includes("private"), false);
+  assert.equal(JSON.stringify(credential).includes("sk-must-not-persist"), false);
 });
 
 test("distinguishes a live runner from a reused PID", () => {

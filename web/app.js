@@ -408,9 +408,15 @@ async function refreshSupervisor() {
     state.supervisor = await fetch("/api/supervisor", { cache: "no-store" }).then(assertJson);
     const pool = state.supervisor.accountPool;
     const active = pool?.accounts?.find((account) => account.id === pool.activeAccountId);
-    byId("active-account").textContent = active?.email || "—";
-    byId("five-hour").textContent = quotaText(active?.primary, active?.reserveFiveHourPercent);
-    byId("weekly").textContent = quotaText(active?.secondary, active?.reserveWeeklyPercent);
+    const credential = state.supervisor.currentCredential;
+    const apiKeyActive = credential?.mode === "api-key";
+    byId("active-account").textContent = credential?.label || active?.email || "—";
+    byId("five-hour").textContent = apiKeyActive
+      ? `${String(credential.provider || "custom").toUpperCase()} API KEY`
+      : quotaText(active?.primary, active?.reserveFiveHourPercent);
+    byId("weekly").textContent = apiKeyActive
+      ? "OAUTH POOL INACTIVE"
+      : quotaText(active?.secondary, active?.reserveWeeklyPercent);
     const checkpoint = state.supervisor.checkpoint;
     byId("next-action").textContent = checkpoint?.retryAt ? `resume ${new Date(checkpoint.retryAt).toLocaleString()}` : checkpoint?.reason || "ready";
     byId("video-parts").textContent = String(state.supervisor.recording?.parts || 0);

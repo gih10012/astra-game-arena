@@ -17,6 +17,9 @@ const FPS = 30;
 export interface ActiveRecordingPair {
   metadata: RecordingPair;
   compositeRelative: string;
+  captureStartedAt: string;
+  captureStartedWallMs: number;
+  captureStartedMono: bigint;
   gameProcess: ChildProcess;
   dashboardProcess: ChildProcess;
   stopping: boolean;
@@ -39,6 +42,9 @@ export async function startRecordingPair(options: {
     dashboard: path.join("recordings", "raw", `dashboard-part-${part}.mkv`),
   };
   const compositeRelative = path.join("recordings", `challenge-part-${part}.mkv`);
+  const captureStartedWallMs = Date.now();
+  const captureStartedMono = process.hrtime.bigint();
+  const captureStartedAt = new Date(captureStartedWallMs).toISOString();
   const gameProcess = spawn(
     "wf-recorder",
     continuousGameRecorderArguments({
@@ -62,6 +68,9 @@ export async function startRecordingPair(options: {
   const active: ActiveRecordingPair = {
     metadata,
     compositeRelative,
+    captureStartedAt,
+    captureStartedWallMs,
+    captureStartedMono,
     gameProcess,
     dashboardProcess,
     stopping: false,
@@ -93,6 +102,17 @@ export async function startRecordingPair(options: {
   }
   ready = true;
   return active;
+}
+
+export function recordingPairIsActive(
+  pair: ActiveRecordingPair | null,
+  attempt: number,
+): pair is ActiveRecordingPair {
+  return pair !== null &&
+    pair.metadata.attempt === attempt &&
+    !pair.stopping &&
+    processRunning(pair.gameProcess) &&
+    processRunning(pair.dashboardProcess);
 }
 
 export async function stopAndComposeRecordingPair(

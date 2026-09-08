@@ -926,6 +926,44 @@ export async function validateCivilizationViDx11Launch(steamRoot: string): Promi
   ) {
     throw new Error("Civilization VI launch wrapper does not replace the DX12 executable with DX11");
   }
+  await verifyCivilizationViDx11WrapperBehavior(wrapper);
+}
+
+async function verifyCivilizationViDx11WrapperBehavior(wrapper: string): Promise<void> {
+  const probeDirectory = await mkdtemp(path.join(os.tmpdir(), "astra-civ6-dx11-probe-"));
+  const probeCommand = path.join(probeDirectory, "capture-arguments.sh");
+  const probeOutput = path.join(probeDirectory, "arguments.txt");
+  const dx12Argument = path.join(probeDirectory, "CivilizationVI_DX12.exe");
+  const dx11Argument = path.join(probeDirectory, "CivilizationVI.exe");
+  const marker = "astra-dx11-probe";
+  try {
+    await writeFile(
+      probeCommand,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "$ASTRA_CIV6_DX11_PROBE_OUTPUT"\n`,
+      { mode: 0o700 },
+    );
+    const result = await runCommand(wrapper, [probeCommand, dx12Argument, marker], {
+      env: {
+        ...process.env,
+        ASTRA_CIV6_DX11_PROBE_OUTPUT: probeOutput,
+      },
+      timeoutMs: 2_000,
+    });
+    const actualArguments = result.code === 0
+      ? await readFile(probeOutput, "utf8").catch(() => "")
+      : "";
+    const lines = actualArguments.split(/\r?\n/).filter(Boolean);
+    if (
+      result.code !== 0 ||
+      !lines.includes(dx11Argument) ||
+      lines.includes(dx12Argument) ||
+      !lines.includes(marker)
+    ) {
+      throw new Error("Civilization VI DX11 launch wrapper failed its argument-rewrite probe");
+    }
+  } finally {
+    await rm(probeDirectory, { recursive: true, force: true });
+  }
 }
 
 function parseVdf(source: string): VdfObject {

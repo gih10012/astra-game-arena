@@ -112,6 +112,20 @@ exec "$@"
     validateCivilizationViDx11Launch(steamRoot),
     /does not replace the DX12 executable/,
   );
+  await writeFile(wrapper, `#!/usr/bin/env bash
+args=("$@")
+for i in "\${!args[@]}"; do
+  if [[ "\${args[$i]}" == *"/CivilizationVI_DX12.exe" ]]; then
+    args[$i]="\${args[$i]%_DX12.exe}.exe"
+  fi
+done
+args=("$@")
+exec "\${args[@]}"
+`);
+  await assert.rejects(
+    validateCivilizationViDx11Launch(steamRoot),
+    /failed its argument-rewrite probe/,
+  );
   await writeFile(path.join(accountConfig, "localconfig.vdf"), `"apps" { "289070" { } }`);
   await assert.rejects(
     validateCivilizationViDx11Launch(steamRoot),

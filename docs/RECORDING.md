@@ -8,7 +8,7 @@
 4. Run `node dist/src/cli.js smoke-model`; do not start a formal run unless it succeeds.
 5. Run `node dist/src/cli.js smoke-headless` once to verify the hidden game, keyboard, dashboard, and 1920×1080 recorder path. This does not use model tokens or alter save progress.
 6. Run `node dist/src/cli.js service install` and confirm the watchdog is active.
-7. Ensure enough free space for long 30 FPS Matroska recording parts and connect stable power/network. The model API needs network. Native search/browser access and shell network are disabled; any alternate external-information lookup invalidates the run.
+7. Ensure enough free space for long 30 FPS Matroska recording parts and connect stable power/network. The model API needs network. Native search/browser surfaces are disabled; Shell and other normal Codex capabilities remain enabled, but using any alternate route to retrieve external puzzle information invalidates the run.
 8. If a live feed is needed in OBS or a meeting client, load a dedicated `v4l2loopback` device and enable it in the web settings. This does not require on-disk recording to be enabled.
 
 ## During the take

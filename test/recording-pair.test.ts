@@ -9,9 +9,32 @@ import { AuditLog } from "../src/audit-log.js";
 import { expectCommand } from "../src/command.js";
 import {
   composeRecordingPair,
+  recordingPairIsActive,
   startRecordingPair,
   type ActiveRecordingPair,
 } from "../src/recording-pair.js";
+
+test("requires both recorder processes to remain active for an attempt", () => {
+  const runningProcess = () => ({ exitCode: null, signalCode: null }) as ChildProcess;
+  const pair: ActiveRecordingPair = {
+    metadata: { attempt: 3, game: "game.mkv", dashboard: "dashboard.mkv" },
+    compositeRelative: "challenge.mkv",
+    captureStartedAt: "2026-01-01T00:00:00.000Z",
+    captureStartedWallMs: 0,
+    captureStartedMono: 0n,
+    gameProcess: runningProcess(),
+    dashboardProcess: runningProcess(),
+    stopping: false,
+  };
+
+  assert.equal(recordingPairIsActive(pair, 3), true);
+  assert.equal(recordingPairIsActive(pair, 2), false);
+  pair.dashboardProcess = { exitCode: 1, signalCode: null } as ChildProcess;
+  assert.equal(recordingPairIsActive(pair, 3), false);
+  pair.dashboardProcess = runningProcess();
+  pair.stopping = true;
+  assert.equal(recordingPairIsActive(pair, 3), false);
+});
 
 test("composes native game and transcript streams into CFR 1920x1080 video", async () => {
   const runDirectory = await mkdtemp(path.join(os.tmpdir(), "game-arena-recording-"));

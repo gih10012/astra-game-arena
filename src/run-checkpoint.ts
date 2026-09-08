@@ -51,6 +51,12 @@ export interface RecordingPair {
   dashboard: string;
 }
 
+export interface CodexCredentialState {
+  mode: "chatgpt-pool" | "api-key";
+  provider: string;
+  label: string;
+}
+
 export interface RunCheckpoint {
   version: 1;
   runId: string;
@@ -72,6 +78,7 @@ export interface RunCheckpoint {
   progress: LevelProgress;
   recordings: string[];
   recordingPairs?: RecordingPair[];
+  credential?: CodexCredentialState | null;
   options: PersistedRunOptions;
 }
 
@@ -88,7 +95,10 @@ export class CheckpointStore {
 
   constructor(filename: string, value: RunCheckpoint) {
     this.filename = filename;
-    this.#value = value;
+    this.#value = {
+      ...value,
+      credential: normalizeCodexCredential(value.credential),
+    };
   }
 
   static async load(runDirectory: string): Promise<CheckpointStore> {
@@ -151,6 +161,38 @@ export class CheckpointStore {
 
 export function checkpointPath(runDirectory: string): string {
   return path.join(path.resolve(runDirectory), CHECKPOINT_FILENAME);
+}
+
+export function normalizeCodexCredential(
+  value: unknown,
+): CodexCredentialState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return defaultChatGptCredential();
+  }
+  const credential = value as Record<string, unknown>;
+  if (
+    credential.mode === "api-key" &&
+    typeof credential.provider === "string" &&
+    /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(credential.provider) &&
+    typeof credential.label === "string" &&
+    credential.label.length > 0 &&
+    credential.label.length <= 120
+  ) {
+    return {
+      mode: "api-key",
+      provider: credential.provider,
+      label: credential.label,
+    };
+  }
+  return defaultChatGptCredential();
+}
+
+function defaultChatGptCredential(): CodexCredentialState {
+  return {
+    mode: "chatgpt-pool",
+    provider: "openai",
+    label: "ChatGPT account pool",
+  };
 }
 
 export function activeRunPath(rootDirectory: string): string {

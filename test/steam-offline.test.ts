@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import {
   prepareSteamOfflineLogin,
+  prepareSteamLoginMode,
+  SteamLoginStateUnavailableError,
   steamLoginConfig,
   steamOfflineLoginConfig,
 } from "../src/steam-offline.js";
@@ -37,7 +39,17 @@ test("can explicitly restore online login flags for an online launch", () => {
 test("rejects a Steam profile that has no cached offline state", () => {
   assert.throws(
     () => steamOfflineLoginConfig('"users"\n{\n}'),
-    /no cached offline-login state/i,
+    (error: unknown) =>
+      error instanceof SteamLoginStateUnavailableError &&
+      /no cached offline-login state/i.test(error.message),
+  );
+});
+
+test("does not classify Steam configuration I/O failures as optional login state", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "arena-steam-io-error-"));
+  await assert.rejects(
+    prepareSteamLoginMode(root, false),
+    (error: unknown) => !(error instanceof SteamLoginStateUnavailableError),
   );
 });
 

@@ -62,6 +62,8 @@ By default, the harness uses `~/.codex-official` when that directory contains `a
 
 If two or more separately authenticated homes exist under `~/.codex-game-arena-accounts/<label>/auth.json`, the runner enables its resumable account pool. The legacy `~/.codex-parabox-accounts` location is still discovered automatically so existing credentials are not lost. The same Codex thread is synchronized through `codex-proxy` when accounts rotate. The control page lets you enable accounts and set independent five-hour and weekly reserve percentages. The scheduler prefers a recently reset account, proactively snapshots before switching, and waits when every enabled account is below its configured reserve. `runs/<run-id>/account-pool.json` records only scheduling telemetry; authentication files remain outside the repository. Multi-account use is disclosed in the audit trail.
 
+If ChatGPT reports that the selected model is unsupported, `codex-proxy` continues the existing thread with the custom-provider API-key credential already configured in `~/.codex`. The fallback uses a private 0700 runtime home outside the repository. Checkpoints and status surfaces retain only its sanitized mode, provider, and label. OAuth accounts and reserve settings stay saved but are not scheduled until a model change clears the fallback and retries the ChatGPT pool.
+
 Validate authentication and the arena MCP tools with a small, non-challenge turn before touching saves:
 
 ```bash
@@ -121,7 +123,7 @@ Defaults:
 - UI: native game at 1920×1080; the final 1280×1080 game pane preserves its aspect ratio, beside a 640×1080 director dashboard
 - physical desktop windows: none by default; `--browser` opens only the monitoring dashboard
 - native web search and network browsers: disabled
-- Shell: enabled in an empty writable workspace, with outbound network disabled
+- Shell: enabled in an empty writable workspace with standard network behavior
 - skills, plugins, apps, memory, and sub-agents: retained from the selected Codex home
 - quota retry: reported reset time + 1 minute; 5-hour fallback
 - multi-account reserve: configurable per account in the control page; newly reset account first
@@ -196,7 +198,7 @@ Codex receives matching MCP tools named `challenge_time` and `challenge_tokens`,
 
 The runner follows the documented `codex exec --json` stream and the local rollout's incremental token events. See the [Codex non-interactive mode documentation](https://learn.chatgpt.com/docs/non-interactive-mode) and [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-The selected Codex home (or each explicitly configured account home) and its normal configuration stay active. The runner adds the Parabox MCP server, forces the official `gpt-6-astra` model, disables native web search and browser features, and uses a `workspace-write` sandbox with command network access off. Because app, plugin, and MCP traffic is outside the command sandbox, using any of them to retrieve external puzzle information invalidates the run; the complete Codex event stream is retained for audit.
+The selected Codex home (or each explicitly configured account home) and its normal configuration stay active. The runner adds the Parabox MCP server, forces the selected model, disables native web search and browser features, and otherwise retains standard Shell, skill, plugin, app, memory, and sub-agent capabilities in a `workspace-write` sandbox. Using any of those capabilities to retrieve external puzzle information invalidates the run; the complete Codex event stream is retained for audit.
 
 ## Reproducibility
 

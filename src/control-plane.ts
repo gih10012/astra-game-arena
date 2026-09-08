@@ -20,6 +20,10 @@ import {
 } from "./account-pool.js";
 import { runCommand } from "./command.js";
 import {
+  CHATGPT_POOL_CREDENTIAL,
+  credentialAfterModelChange,
+} from "./codex-home.js";
+import {
   CheckpointStore,
   clearActiveRun,
   durableJsonWrite,
@@ -38,7 +42,11 @@ import {
   type RuntimeConfigAck,
   type RuntimeMediaState,
 } from "./runtime-config.js";
-import { cancelChallenge, queueChallenge } from "./runner.js";
+import {
+  cancelChallenge,
+  currentCredentialStatus,
+  queueChallenge,
+} from "./runner.js";
 import { restoreFromRecovery } from "./save-guard.js";
 import { discoverInstalledSteamGames } from "./steam-catalog.js";
 import {
@@ -258,6 +266,9 @@ export class ControlPlane {
       json(response, 200, {
         active: checkpoint !== null,
         checkpoint,
+        currentCredential: checkpoint
+          ? currentCredentialStatus(checkpoint.credential, accountPool)
+          : null,
         accountPool,
         recording: recordingStatus(checkpoint, mediaState),
         virtualCamera: virtualCameraStatus(checkpoint, mediaState),
@@ -479,6 +490,15 @@ export class ControlPlane {
           const store = await CheckpointStore.load(checkpoint.runDirectory);
           await store.update((current) => ({
             options: { ...current.options, ...patch },
+            ...(patch.model !== undefined && patch.model !== current.options.model
+              ? {
+                  credential: credentialAfterModelChange(
+                    current.credential ?? CHATGPT_POOL_CREDENTIAL,
+                    current.options.model,
+                    patch.model,
+                  ),
+                }
+              : {}),
           }));
           // A watchdog may start a waiting run between this read and write.
           // Leave the same idempotent patch in the runner queue so a process
@@ -885,9 +905,16 @@ function statusSnapshot(options: {
 }) {
   const checkpoint = options.checkpoint;
   const accounts = options.accountPool?.accounts.map(publicAccountStatus) ?? [];
-  const currentAccount = accounts.find(
-    (account) => account.id === options.accountPool?.activeAccountId,
-  ) ?? null;
+  const currentCredential = checkpoint
+    ? currentCredentialStatus(checkpoint.credential, options.accountPool)
+    : null;
+  const apiKeyActive = currentCredential?.mode === "api-key";
+  const activeAccountId = apiKeyActive
+    ? null
+    : options.accountPool?.activeAccountId ?? null;
+  const currentAccount = apiKeyActive
+    ? null
+    : accounts.find((account) => account.id === activeAccountId) ?? null;
   const futureResets = accounts.flatMap((account) => [
     account.fiveHour.resetsAt,
     account.weekly.resetsAt,
@@ -900,8 +927,8 @@ function statusSnapshot(options: {
     .filter((value): value is string =>
       value !== null && Date.parse(value) > Date.now()
     );
-  const earliestResetAt = earliestIso(futureResets);
-  const earliestFiveHourResetAt = earliestIso(fiveHourResets);
+  const earliestResetAt = apiKeyActive ? null : earliestIso(futureResets);
+  const earliestFiveHourResetAt = apiKeyActive ? null : earliestIso(fiveHourResets);
   return {
     generatedAt: new Date().toISOString(),
     service: {
@@ -925,9 +952,12 @@ function statusSnapshot(options: {
       options.virtualCameras[0]?.device ?? "/dev/video10",
       options.operatorConfiguration,
     ),
+    currentCredential,
     currentAccount,
     accountPool: {
-      activeAccountId: options.accountPool?.activeAccountId ?? null,
+      schedulingActive:
+        checkpoint !== null && !isTerminal(checkpoint.phase) && !apiKeyActive,
+      activeAccountId,
       accounts,
       earliestResetAt,
       earliestFiveHourResetAt,

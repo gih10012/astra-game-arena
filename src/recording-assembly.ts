@@ -9,11 +9,11 @@ import {
   type RunCheckpoint,
 } from "./run-checkpoint.js";
 
-const ASSEMBLY_VERSION = 2;
+const ASSEMBLY_VERSION = 4;
 const FRAMES_PER_SECOND = 30;
 const LEGACY_RECORDER_PROBE_MS = 1_000;
 
-interface AuditEvent {
+export interface AuditEvent {
   at: string;
   type: string;
   data: unknown;
@@ -25,6 +25,12 @@ export interface RecordingCut {
   activeDurationSeconds: number | null;
 }
 
+export interface OmittedRecordingPart {
+  attempt: number;
+  filename: string;
+  reason: "unplayable" | "empty-cut";
+}
+
 export interface RecordingAssembly {
   output: string;
   complete: boolean;
@@ -32,18 +38,29 @@ export interface RecordingAssembly {
   bytes: number;
   sources: string[];
   cuts: RecordingCut[];
+  activeElapsedMs: number | null;
+  omittedParts: OmittedRecordingPart[];
   trimmedResumeSeconds: number;
   omittedOpenRecording: string | null;
 }
 
-export function sealedRecordingNames(checkpoint: RunCheckpoint): {
+export function sealedRecordingNames(
+  checkpoint: RunCheckpoint,
+  events: AuditEvent[] = [],
+): {
   names: string[];
   omittedOpenRecording: string | null;
 } {
   const names = [...checkpoint.recordings];
+  if (checkpoint.recordingPairs !== undefined) {
+    const confirmed = confirmedRecordingNames(events);
+    return {
+      names: names.filter((name) => confirmed.has(name)),
+      omittedOpenRecording: null,
+    };
+  }
   const last = names.at(-1) ?? null;
   const lastMayStillBeOpen =
-    checkpoint.recordingPairs === undefined &&
     last !== null &&
     (checkpoint.phase === "starting" || checkpoint.phase === "running");
   return {
@@ -58,19 +75,42 @@ export async function assembleRecordings(
 ): Promise<RecordingAssembly> {
   const runDirectory = path.resolve(requestedRunDirectory);
   const checkpoint = (await CheckpointStore.load(runDirectory)).snapshot();
-  const selection = sealedRecordingNames(checkpoint);
+  const events = await readAuditEvents(path.join(runDirectory, "events.jsonl"));
+  const selection = sealedRecordingNames(checkpoint, events);
   if (selection.names.length === 0) {
     throw new Error("No sealed recording parts are available yet");
   }
 
   const sources: string[] = [];
-  for (const name of selection.names) {
-    sources.push(await releaseRecordingPath(runDirectory, name));
+  const cuts: RecordingCut[] = [];
+  const omittedParts: OmittedRecordingPart[] = [];
+  const candidateCuts = recordingCuts(events, selection.names);
+  for (let index = 0; index < selection.names.length; index += 1) {
+    const name = selection.names[index];
+    const cut = candidateCuts[index];
+    if (!name || !cut) throw new Error("Recording assembly plan is incomplete");
+    let source: string;
+    let sourceVideo: Awaited<ReturnType<typeof validateVideo>>;
+    try {
+      source = await releaseRecordingPath(runDirectory, name);
+      sourceVideo = await validateVideo(source);
+    } catch {
+      omittedParts.push({ attempt: cut.attempt, filename: name, reason: "unplayable" });
+      continue;
+    }
+    const missingActiveBoundary = checkpoint.recordingPairs !== undefined &&
+      !hasActiveBoundary(events, cut.attempt);
+    if (missingActiveBoundary || !cutContainsFrame(cut, sourceVideo.durationSeconds)) {
+      omittedParts.push({ attempt: cut.attempt, filename: name, reason: "empty-cut" });
+      continue;
+    }
+    sources.push(source);
+    cuts.push(cut);
   }
-  const cuts = recordingCuts(
-    await readAuditEvents(path.join(runDirectory, "events.jsonl")),
-    selection.names,
-  );
+  if (sources.length === 0) {
+    throw new Error("No playable sealed recording parts are available yet");
+  }
+  const activeElapsedMs = exactActiveElapsedMs(events, cuts);
 
   const productionDirectory = path.join(runDirectory, "production");
   await mkdir(productionDirectory, { recursive: true });
@@ -90,6 +130,8 @@ export async function assembleRecordings(
     complete: checkpoint.phase === "completed",
     sources,
     cuts,
+    activeElapsedMs,
+    omittedParts,
   };
   const metadataPath = path.join(productionDirectory, "assembly.json");
   try {
@@ -97,13 +139,17 @@ export async function assembleRecordings(
       signature?: unknown;
       result?: RecordingAssembly;
     };
-    await access(output);
+    await validateVideo(output);
     if (
       existing.result &&
       JSON.stringify(existing.signature) === JSON.stringify(assemblySignature)
     ) {
       return {
         ...existing.result,
+        sources,
+        cuts,
+        activeElapsedMs,
+        omittedParts,
         omittedOpenRecording: selection.omittedOpenRecording,
       };
     }
@@ -167,6 +213,8 @@ export async function assembleRecordings(
       bytes,
       sources,
       cuts,
+      activeElapsedMs,
+      omittedParts,
       trimmedResumeSeconds: cuts.reduce(
         (total, cut) => total + cut.trimStartSeconds,
         0,
@@ -187,6 +235,52 @@ export async function assembleRecordings(
     await rm(listPath, { force: true });
     await rm(temporaryOutput, { force: true });
   }
+}
+
+export interface RecordingTimingReconciliation {
+  beforeElapsedMs: number;
+  afterElapsedMs: number;
+  omittedAttempts: number[];
+  reason: string;
+}
+
+export function recordingTimingReconciliation(
+  checkpoint: RunCheckpoint,
+  assembly: RecordingAssembly,
+): RecordingTimingReconciliation | null {
+  if (!checkpoint.options.record || checkpoint.recordingPairs === undefined) return null;
+  if (
+    assembly.activeElapsedMs === null ||
+    !Number.isFinite(assembly.activeElapsedMs) ||
+    assembly.activeElapsedMs < 0 ||
+    assembly.activeElapsedMs >= checkpoint.elapsedMs
+  ) {
+    return null;
+  }
+  if (assembly.omittedParts.some((part) => part.reason === "unplayable")) return null;
+  const emptyResumedAttempts = assembly.omittedParts
+    .filter((part) => part.reason === "empty-cut" && part.attempt > 1)
+    .map((part) => part.attempt);
+  if (emptyResumedAttempts.length === 0) return null;
+
+  const accountedAttempts = new Set([
+    ...assembly.cuts.map((cut) => cut.attempt),
+    ...assembly.omittedParts.map((part) => part.attempt),
+  ]);
+  let checkpointAttempts: number[];
+  try {
+    checkpointAttempts = checkpoint.recordings.map(recordingAttempt);
+  } catch {
+    return null;
+  }
+  if (checkpointAttempts.some((attempt) => !accountedAttempts.has(attempt))) return null;
+
+  return {
+    beforeElapsedMs: checkpoint.elapsedMs,
+    afterElapsedMs: assembly.activeElapsedMs,
+    omittedAttempts: [...new Set(emptyResumedAttempts)].sort((left, right) => left - right),
+    reason: "Excluded resumed recording cuts that contain no playable frame",
+  };
 }
 
 export async function runAssemblyWatcher(
@@ -228,7 +322,7 @@ export function recordingCuts(
   recordingNames: string[],
 ): RecordingCut[] {
   const recordings = new Map<number, { eventAtMs: number; captureAtMs: number }>();
-  const activeStarts = new Map<number, { eventAtMs: number; elapsedMs: number }>();
+  const activeStarts = new Map<number, { activeAtMs: number; elapsedMs: number }>();
   const activeEnds = new Map<number, number>();
   for (const event of events) {
     const data = objectValue(event.data);
@@ -248,13 +342,19 @@ export function recordingCuts(
     }
     if (event.type === "challenge.started" || event.type === "challenge.resumed") {
       const eventAtMs = Date.parse(event.at);
-      const elapsedMs = nestedElapsedMs(data);
+      const explicitActiveAtMs = Date.parse(stringValue(data?.activeStartedAt) ?? "");
+      const elapsedMs = numberValue(data?.activeStartedElapsedMs) ?? nestedElapsedMs(data);
       if (Number.isFinite(eventAtMs) && elapsedMs !== null) {
-        activeStarts.set(attempt, { eventAtMs, elapsedMs });
+        activeStarts.set(attempt, {
+          activeAtMs: Number.isFinite(explicitActiveAtMs)
+            ? explicitActiveAtMs
+            : eventAtMs,
+          elapsedMs,
+        });
       }
     }
     if (event.type === "attempt.finished") {
-      const elapsedMs = nestedElapsedMs(data);
+      const elapsedMs = numberValue(data?.activeEndedElapsedMs) ?? nestedElapsedMs(data);
       if (elapsedMs !== null) activeEnds.set(attempt, elapsedMs);
     }
   }
@@ -273,14 +373,43 @@ export function recordingCuts(
       attempt === 1 || !recording || !activeStart
         ? 0
         : frameCeiling(
-            Math.max(0, activeStart.eventAtMs - recording.captureAtMs) / 1_000,
+            Math.max(0, activeStart.activeAtMs - recording.captureAtMs) / 1_000,
           );
+    const activeStartElapsedMs = attempt === 1 ? 0 : activeStart?.elapsedMs;
     const activeDurationSeconds =
-      activeStart && endElapsedMs !== null
-        ? frameRounding(Math.max(0, endElapsedMs - activeStart.elapsedMs) / 1_000)
+      activeStartElapsedMs !== undefined && endElapsedMs !== null
+        ? frameRounding(Math.max(0, endElapsedMs - activeStartElapsedMs) / 1_000)
         : null;
     return { attempt, trimStartSeconds, activeDurationSeconds };
   });
+}
+
+function exactActiveElapsedMs(events: AuditEvent[], cuts: RecordingCut[]): number | null {
+  const activeStarts = new Map<number, number>();
+  const activeEnds = new Map<number, number>();
+  for (const event of events) {
+    const data = objectValue(event.data);
+    const attempt = numberValue(data?.attempt);
+    if (attempt === null) continue;
+    if (event.type === "challenge.started" || event.type === "challenge.resumed") {
+      const elapsedMs = numberValue(data?.activeStartedElapsedMs) ?? nestedElapsedMs(data);
+      if (elapsedMs !== null) activeStarts.set(attempt, elapsedMs);
+    }
+    if (event.type === "attempt.finished") {
+      const elapsedMs = numberValue(data?.activeEndedElapsedMs) ?? nestedElapsedMs(data);
+      if (elapsedMs !== null) activeEnds.set(attempt, elapsedMs);
+    }
+  }
+  const sortedStarts = [...activeStarts.entries()].sort(([left], [right]) => left - right);
+  let total = 0;
+  for (const cut of cuts) {
+    const startElapsedMs = cut.attempt === 1 ? 0 : activeStarts.get(cut.attempt);
+    const endElapsedMs = activeEnds.get(cut.attempt) ??
+      sortedStarts.find(([attempt]) => attempt > cut.attempt)?.[1];
+    if (startElapsedMs === undefined || endElapsedMs === undefined) return null;
+    total += Math.max(0, endElapsedMs - startElapsedMs);
+  }
+  return total;
 }
 
 async function normalizeRecording(
@@ -304,8 +433,10 @@ async function normalizeRecording(
     const existing = JSON.parse(await readFile(metadataPath, "utf8")) as {
       signature?: unknown;
     };
-    await access(output);
-    if (JSON.stringify(existing.signature) === JSON.stringify(signature)) return output;
+    if (JSON.stringify(existing.signature) === JSON.stringify(signature)) {
+      await validateVideo(output);
+      return output;
+    }
   } catch {
     // Missing or stale normalized segment; regenerate it atomically.
   }
@@ -380,8 +511,10 @@ async function validateVideo(filename: string): Promise<{
         [
           "-v",
           "error",
+          "-select_streams",
+          "v:0",
           "-show_entries",
-          "format=duration,size",
+          "stream=width,height:format=duration,size",
           "-of",
           "json",
           filename,
@@ -389,10 +522,23 @@ async function validateVideo(filename: string): Promise<{
         { timeoutMs: 60_000 },
       )
     ).toString("utf8"),
-  ) as { format?: { duration?: string; size?: string } };
+  ) as {
+    streams?: Array<{ width?: number; height?: number }>;
+    format?: { duration?: string; size?: string };
+  };
   const durationSeconds = Number(probe.format?.duration);
   const bytes = Number(probe.format?.size ?? (await stat(filename)).size);
-  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || bytes <= 0) {
+  const video = probe.streams?.[0];
+  if (
+    !video ||
+    !Number.isFinite(video.width) ||
+    Number(video.width) <= 0 ||
+    !Number.isFinite(video.height) ||
+    Number(video.height) <= 0 ||
+    !Number.isFinite(durationSeconds) ||
+    durationSeconds <= 0 ||
+    bytes <= 0
+  ) {
     throw new Error(`FFmpeg produced an invalid recording: ${filename}`);
   }
   return { durationSeconds, bytes };
@@ -413,6 +559,41 @@ async function readAuditEvents(filename: string): Promise<AuditEvent[]> {
   } catch {
     return [];
   }
+}
+
+function confirmedRecordingNames(events: AuditEvent[]): Set<string> {
+  const confirmed = new Set<string>();
+  for (const event of events) {
+    const data = objectValue(event.data);
+    if (event.type === "recording.sealed") {
+      const filename = stringValue(data?.filename);
+      if (filename) confirmed.add(filename);
+    }
+    if (event.type === "recording.recovered" && Array.isArray(data?.recordings)) {
+      for (const value of data.recordings) {
+        const filename = stringValue(value);
+        if (filename) confirmed.add(filename);
+      }
+    }
+  }
+  return confirmed;
+}
+
+function cutContainsFrame(cut: RecordingCut, sourceDurationSeconds: number): boolean {
+  const availableSeconds = sourceDurationSeconds - cut.trimStartSeconds;
+  const selectedSeconds = cut.activeDurationSeconds === null
+    ? availableSeconds
+    : Math.min(availableSeconds, cut.activeDurationSeconds);
+  return selectedSeconds >= 1 / FRAMES_PER_SECOND;
+}
+
+function hasActiveBoundary(events: AuditEvent[], attempt: number): boolean {
+  return events.some((event) => {
+    if (event.type !== "challenge.started" && event.type !== "challenge.resumed") {
+      return false;
+    }
+    return numberValue(objectValue(event.data)?.attempt) === attempt;
+  });
 }
 
 function recordingAttempt(filename: string): number {

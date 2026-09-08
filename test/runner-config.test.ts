@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,13 +8,42 @@ import { extractQuotaResetAt } from "../src/codex-events.js";
 import { codexEnvironment } from "../src/codex-home.js";
 import {
   codexArguments,
+  cleanupErrorText,
   isQuotaError,
   extractQuotaResetAtFromText,
+  hasHistoricalUnsupportedChatGptModel,
   ensureCodexThreadInBase,
   NEUTRAL_PROMPT,
+  outcomeAfterCleanup,
   quotaRetryAt,
   RESUME_PROMPT,
 } from "../src/runner.js";
+
+test("makes teardown failures visible in the checkpoint outcome", () => {
+  assert.equal(
+    cleanupErrorText(new AggregateError([
+      new Error("Steam login restore failed"),
+      new Error("runtime directory removal failed"),
+    ], "Virtual game teardown failed")),
+    "Virtual game teardown failed: Steam login restore failed; runtime directory removal failed",
+  );
+  assert.deepEqual(
+    outcomeAfterCleanup("completed", null, null, ["virtual game: login restore failed"]),
+    {
+      phase: "failed",
+      retryAt: null,
+      reason: "Cleanup incomplete: virtual game: login restore failed",
+    },
+  );
+  assert.deepEqual(
+    outcomeAfterCleanup("paused", null, "Paused by SIGINT", ["virtual game: cleanup failed"]),
+    {
+      phase: "paused",
+      retryAt: null,
+      reason: "Paused by SIGINT; Cleanup incomplete: virtual game: cleanup failed",
+    },
+  );
+});
 
 test("disables search and browsers while retaining normal Codex capabilities", () => {
   const args = codexArguments({
@@ -28,7 +57,7 @@ test("disables search and browsers while retaining normal Codex capabilities", (
   assert.ok(args.includes("features.browser_use=false"));
   assert.ok(args.includes("features.browser_use_external=false"));
   assert.ok(args.includes("features.in_app_browser=false"));
-  assert.ok(args.includes("sandbox_workspace_write.network_access=false"));
+  assert.equal(args.includes("sandbox_workspace_write.network_access=false"), false);
   assert.equal(args.includes("--ignore-user-config"), false);
   assert.equal(args.includes("features.shell_tool=false"), false);
   assert.equal(args.includes("features.multi_agent=false"), false);
@@ -56,6 +85,42 @@ test("passes the selected credential home through the local Codex launcher", () 
   assert.equal(env.CODEX_HOME_OVERRIDE, "/credentials/codex");
   assert.equal(env.CODEX_PROXY_HOME, "/credentials/codex");
   assert.equal(env.CODEX_BASE_HOME, "/credentials/base");
+});
+
+test("pins a custom provider when the API-key fallback is active", () => {
+  const args = codexArguments({
+    mcpEntry: "/arena/mcp.js",
+    arenaUrl: "http://127.0.0.1:4317",
+    controlToken: "secret",
+    reasoningEffort: "high",
+    model: "gpt-6-astra",
+    modelProvider: "crs",
+  });
+  assert.ok(args.includes('model_provider="crs"'));
+});
+
+test("recognizes the persisted unsupported-model result before a cold resume", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "codex-fallback-history-"));
+  try {
+    await writeFile(
+      path.join(root, "codex-exec.jsonl"),
+      JSON.stringify({
+        type: "error",
+        message:
+          "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account.",
+      }),
+    );
+    assert.equal(
+      await hasHistoricalUnsupportedChatGptModel(root, "gpt-6-astra"),
+      true,
+    );
+    assert.equal(
+      await hasHistoricalUnsupportedChatGptModel(root, "gpt-5.6-sol"),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("recovers a newer account thread and sqlite index into the shared base", async () => {
