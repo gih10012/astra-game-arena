@@ -150,6 +150,10 @@ export class X11GameAdapter implements GameAdapter {
         /(?:_NET_WM_NAME|WM_NAME)[^(]*\([^)]*\)\s*=\s*"([^"]+)"/.exec(
           properties,
         )?.[1] ?? "Steam game";
+      // Crash reporters commonly inherit the game's WM_CLASS and can appear
+      // before the real render window.  Selecting one makes every subsequent
+      // input target a transient auxiliary dialog instead of the game.
+      if (isAuxiliaryGameWindowTitle(title)) continue;
       this.#window = { id, title, app_id: "steam_game" };
       return { windowId: id, title };
     }
@@ -355,6 +359,10 @@ export class X11GameAdapter implements GameAdapter {
   }
 }
 
+export function isAuxiliaryGameWindowTitle(title: string): boolean {
+  return /(?:crash|bug\s*report|reporter|崩溃报告|錯誤報告|错误报告)/i.test(title);
+}
+
 async function waitForStableFile(filename: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let previousSize = -1;
@@ -387,6 +395,7 @@ const pixel = Buffer.from(
 
 export class MockGameAdapter implements GameAdapter {
   presses: AllowedKey[][] = [];
+  pointerActions: Array<Record<string, number | string>> = [];
 
   async discover() {
     return { windowId: 1, title: "Steam game (mock)" };
@@ -408,6 +417,19 @@ export class MockGameAdapter implements GameAdapter {
     _options: { intervalMs: number; settleMs: number },
   ): Promise<void> {
     this.presses.push([...keys]);
+  }
+
+  async movePointer(x: number, y: number): Promise<void> {
+    this.pointerActions.push({ action: "move", x, y });
+  }
+
+  async clickPointer(
+    x: number,
+    y: number,
+    button: "left" | "middle" | "right",
+    count: number,
+  ): Promise<void> {
+    this.pointerActions.push({ action: "click", x, y, button, count });
   }
 
   async close(): Promise<void> {}

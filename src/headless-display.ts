@@ -671,10 +671,6 @@ async function stopProtonPrefix(
     env: environment,
     timeoutMs: 5_000,
   }).catch(() => undefined);
-  await runCommand(proton, ["runinprefix", "wineserver", "-w"], {
-    env: environment,
-    timeoutMs: 5_000,
-  }).catch(() => undefined);
 }
 
 function logChildOutput(child: ChildProcess, filename: string): void {

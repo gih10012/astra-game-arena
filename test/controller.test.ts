@@ -53,6 +53,23 @@ test("serves public metrics and protects game controls", async (context) => {
   }).then((response) => response.json());
   assert.equal(press.pressed, 2);
   assert.deepEqual(game.presses, [["UP", "LEFT"]]);
+
+  const click = await fetch(`${url}/internal/pointer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ action: "click", x: 1_919, y: 1_079, settleMs: 0 }),
+  });
+  assert.equal(click.status, 200);
+  assert.deepEqual(game.pointerActions, [{
+    action: "click", x: 1_919, y: 1_079, button: "left", count: 1,
+  }]);
+
+  const outside = await fetch(`${url}/internal/pointer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ action: "click", x: 1_920, y: 1_079, settleMs: 0 }),
+  });
+  assert.equal(outside.status, 500);
 });
 
 test("serves a durable holding frame before the live game is restored", async (context) => {

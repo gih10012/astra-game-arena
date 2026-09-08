@@ -10,6 +10,7 @@ import {
   freeXDisplay,
   gameLaunchStrategy,
 } from "../src/headless-display.js";
+import { isAuxiliaryGameWindowTitle } from "../src/game-adapter.js";
 
 test("selects a no-Steam direct launch only when offline mode is enabled", () => {
   assert.equal(gameLaunchStrategy({ appId: "289070" }), "steam-managed");
@@ -27,6 +28,12 @@ test("maps discrete GPU selection to PRIME offload variables", () => {
     __GLX_VENDOR_LIBRARY_NAME: "nvidia",
     DRI_PRIME: "1",
   });
+});
+
+test("rejects crash reporters that inherit a game's window class", () => {
+  assert.equal(isAuxiliaryGameWindowTitle("Firaxis崩溃报告"), true);
+  assert.equal(isAuxiliaryGameWindowTitle("Unity Crash Handler"), true);
+  assert.equal(isAuxiliaryGameWindowTitle("Sid Meier's Civilization VI (DX11)"), false);
 });
 
 test("records the continuous private compositor and dashboard displays", () => {

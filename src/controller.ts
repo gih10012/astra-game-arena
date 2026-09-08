@@ -232,7 +232,7 @@ export class ArenaController {
       this.#authorize(request);
       const body = await readJson(request);
       const action = String(body.action ?? "");
-      const x = boundedInteger(body.x, 0, 1_279, 0);
+      const x = boundedInteger(body.x, 0, 1_919, 0);
       const y = boundedInteger(body.y, 0, 1_079, 0);
       await this.#onGameAction?.("before");
       if (action === "move") {
@@ -245,7 +245,7 @@ export class ArenaController {
         await this.game.clickPointer(x, y, button, count);
       } else if (action === "drag") {
         if (!this.game.dragPointer) throw new Error("Pointer dragging is unavailable");
-        const toX = boundedInteger(body.toX, 0, 1_279, x);
+        const toX = boundedInteger(body.toX, 0, 1_919, x);
         const toY = boundedInteger(body.toY, 0, 1_079, y);
         const durationMs = boundedInteger(body.durationMs, 0, 5_000, 500);
         await this.game.dragPointer(x, y, toX, toY, durationMs);
