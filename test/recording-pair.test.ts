@@ -9,6 +9,7 @@ import { AuditLog } from "../src/audit-log.js";
 import { expectCommand } from "../src/command.js";
 import {
   composeRecordingPair,
+  discoverCompletedRecordingPairs,
   recordingPairIsActive,
   startRecordingPair,
   type ActiveRecordingPair,
@@ -62,6 +63,19 @@ test("composes native game and transcript streams into CFR 1920x1080 video", asy
     "-of", "json", path.join(runDirectory, relative),
   ])).toString("utf8")) as { streams: Array<{ width: number; height: number; r_frame_rate: string }> };
   assert.deepEqual(probe.streams[0], { width: 1920, height: 1080, r_frame_rate: "30/1" });
+  const pair = {
+    attempt: 1,
+    game: path.relative(runDirectory, game),
+    dashboard: path.relative(runDirectory, dashboard),
+  };
+  assert.deepEqual(
+    await discoverCompletedRecordingPairs(runDirectory, [pair], [], 2),
+    [relative],
+  );
+  assert.deepEqual(
+    await discoverCompletedRecordingPairs(runDirectory, [pair], [], 1),
+    [],
+  );
 });
 
 test("reports a recorder that dies after startup", async () => {

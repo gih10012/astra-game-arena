@@ -181,6 +181,10 @@ export async function composeRecordingPair(
 export async function recoverRecordingPairs(
   runDirectory: string,
   persistedPairs: RecordingPair[],
+  options: {
+    beforeAttempt?: number;
+    knownRecordings?: readonly string[];
+  } = {},
 ): Promise<{ recordings: string[]; warnings: string[] }> {
   const pairs = new Map(persistedPairs.map((pair) => [pair.attempt, pair]));
   const rawDirectory = path.join(runDirectory, "recordings", "raw");
@@ -201,11 +205,19 @@ export async function recoverRecordingPairs(
 
   const recordings: string[] = [];
   const warnings: string[] = [];
+  const known = new Set(options.knownRecordings ?? []);
   for (const pair of [...pairs.values()].sort((left, right) => left.attempt - right.attempt)) {
+    if (options.beforeAttempt !== undefined && pair.attempt >= options.beforeAttempt) {
+      continue;
+    }
     const composite = path.join(
       "recordings",
       `challenge-part-${String(pair.attempt).padStart(4, "0")}.mkv`,
     );
+    if (known.has(composite)) {
+      recordings.push(composite);
+      continue;
+    }
     const output = path.join(runDirectory, composite);
     if (await recordingIsPlayable(output)) {
       recordings.push(composite);
@@ -225,6 +237,32 @@ export async function recoverRecordingPairs(
     }
   }
   return { recordings, warnings };
+}
+
+export async function discoverCompletedRecordingPairs(
+  runDirectory: string,
+  persistedPairs: readonly RecordingPair[],
+  knownRecordings: readonly string[],
+  beforeAttempt: number,
+): Promise<string[]> {
+  const known = new Set(knownRecordings);
+  const discovered: string[] = [];
+  for (const pair of persistedPairs) {
+    if (pair.attempt >= beforeAttempt) continue;
+    const composite = path.join(
+      "recordings",
+      `challenge-part-${String(pair.attempt).padStart(4, "0")}.mkv`,
+    );
+    if (known.has(composite)) continue;
+    const output = path.join(runDirectory, composite);
+    try {
+      await access(output);
+    } catch {
+      continue;
+    }
+    if (await recordingIsPlayable(output)) discovered.push(composite);
+  }
+  return discovered;
 }
 
 async function recordingIsPlayable(filename: string): Promise<boolean> {

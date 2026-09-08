@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { AuditLog } from "./audit-log.js";
 import { expectCommand } from "./command.js";
+import { recoverRecordingPairs } from "./recording-pair.js";
 import {
   CheckpointStore,
   durableJsonWrite,
+  processMatches,
   readActiveRun,
   type RunCheckpoint,
 } from "./run-checkpoint.js";
@@ -303,6 +306,29 @@ export async function runAssemblyWatcher(
       const assemblyTarget = runDirectory ?? lastRunDirectory;
       if (assemblyTarget) {
         try {
+          const checkpoint = (await CheckpointStore.load(assemblyTarget)).snapshot();
+          if (checkpoint.options.record && checkpoint.recordingPairs) {
+            const hasLiveRecorder =
+              (checkpoint.phase === "starting" || checkpoint.phase === "running") &&
+              checkpoint.pid !== null &&
+              processMatches(checkpoint.pid, checkpoint.pidStartTicks);
+            const recovered = await recoverRecordingPairs(
+              assemblyTarget,
+              checkpoint.recordingPairs,
+              {
+                beforeAttempt: hasLiveRecorder
+                  ? checkpoint.attempt
+                  : checkpoint.attempt + 1,
+                knownRecordings: checkpoint.recordings,
+              },
+            );
+            if (recovered.warnings.length > 0) {
+              const audit = new AuditLog(assemblyTarget);
+              for (const warning of recovered.warnings) {
+                await audit.append("recording.recovery.warning", warning);
+              }
+            }
+          }
           await assembleRecordings(assemblyTarget);
         } catch (error) {
           console.error(`Cumulative recording refresh failed: ${String(error)}`);

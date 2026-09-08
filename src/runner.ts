@@ -51,8 +51,8 @@ import {
   type VirtualGameRuntime,
 } from "./headless-display.js";
 import {
+  discoverCompletedRecordingPairs,
   recordingPairIsActive,
-  recoverRecordingPairs,
   startRecordingPair,
   stopAndComposeRecordingPair,
   type ActiveRecordingPair,
@@ -356,32 +356,24 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   const paths = defaultGamePaths();
   const isParabox = selectedGame.appId === "1260520";
   const audit = new AuditLog(runDirectory);
-  if (prior.options.record && prior.recordingPairs) {
-    const recovered = await recoverRecordingPairs(runDirectory, prior.recordingPairs);
-    if (recovered.recordings.length > 0) {
-      await checkpointStore.update((current) => ({
-        recordings: [...new Set([...current.recordings, ...recovered.recordings])],
-      }));
-      await audit.append("recording.recovered", { recordings: recovered.recordings });
-    }
-    for (const warning of recovered.warnings) {
-      await audit.append("recording.recovery.warning", warning);
-    }
-    if (prior.attempt > 0 && checkpointStore.snapshot().recordings.length > 0) {
-      try {
-        const assembly = await assembleRecordings(runDirectory);
-        const reconciliation = recordingTimingReconciliation(
-          checkpointStore.snapshot(),
-          assembly,
-        );
-        if (reconciliation) {
-          await checkpointStore.update({ elapsedMs: reconciliation.afterElapsedMs });
-          prior = checkpointStore.snapshot();
-          await audit.append("timing.reconciled", reconciliation);
-        }
-      } catch (error) {
-        await audit.append("timing.reconciliation.warning", String(error));
+  if (
+    prior.options.record &&
+    prior.attempt > 0 &&
+    checkpointStore.snapshot().recordings.length > 0
+  ) {
+    try {
+      const assembly = await assembleRecordings(runDirectory);
+      const reconciliation = recordingTimingReconciliation(
+        checkpointStore.snapshot(),
+        assembly,
+      );
+      if (reconciliation) {
+        await checkpointStore.update({ elapsedMs: reconciliation.afterElapsedMs });
+        prior = checkpointStore.snapshot();
+        await audit.append("timing.reconciled", reconciliation);
       }
+    } catch (error) {
+      await audit.append("timing.reconciliation.warning", String(error));
     }
   }
   const state = new ChallengeState(
@@ -533,6 +525,21 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   const recordedAttempts = new Set(
     (prior.recordingPairs ?? []).map((pair) => pair.attempt),
   );
+
+  const adoptCompletedRecordingPairs = async () => {
+    const current = checkpointStore.snapshot();
+    const recovered = await discoverCompletedRecordingPairs(
+      runDirectory,
+      current.recordingPairs ?? [],
+      current.recordings,
+      attempt,
+    );
+    if (recovered.length === 0) return;
+    await checkpointStore.update((latest) => ({
+      recordings: [...new Set([...latest.recordings, ...recovered])],
+    }));
+    await audit.append("recording.recovered", { recordings: recovered });
+  };
 
   const updateMediaState = async (patch: Partial<RuntimeMediaState>) => {
     mediaState = {
@@ -1472,6 +1479,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           state,
           prior.options.isolateSaves && isParabox ? saveGuard : null,
         )
+          .then(adoptCompletedRecordingPairs)
           .catch((error: unknown) => {
             void audit.append("checkpoint.warning", String(error));
           })
