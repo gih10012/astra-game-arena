@@ -139,4 +139,11 @@ test("reports active configuration, account percentages, and earliest reset", as
   assert.equal(status.earliestResetAt, new Date(fiveHourReset).toISOString());
   assert.equal(status.accountPool.earliestFiveHourResetAt, new Date(fiveHourReset).toISOString());
   assert.equal("home" in status.currentAccount, false);
+
+  const firstPause = await fetch(`${url}/api/control/pause`, { method: "POST" })
+    .then((response) => response.json());
+  assert.equal(firstPause.alreadyPaused, undefined);
+  const secondPause = await fetch(`${url}/api/control/pause`, { method: "POST" })
+    .then((response) => response.json());
+  assert.equal(secondPause.alreadyPaused, true);
 });

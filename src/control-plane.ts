@@ -310,7 +310,14 @@ export class ControlPlane {
     }
     if (request.method === "POST" && url.pathname === "/api/control/pause") {
       const checkpoint = await requiredCheckpoint(this.rootDirectory);
+      if (checkpoint.phase === "paused") {
+        json(response, 202, { accepted: true, action: "pause", alreadyPaused: true });
+        return;
+      }
       if (checkpoint.pid !== null && processMatches(checkpoint.pid, checkpoint.pidStartTicks)) {
+        await (await CheckpointStore.load(checkpoint.runDirectory)).update({
+          phase: "paused", retryAt: null, reason: "Pause requested from control plane",
+        });
         process.kill(checkpoint.pid, "SIGINT");
       } else {
         await (await CheckpointStore.load(checkpoint.runDirectory)).update({

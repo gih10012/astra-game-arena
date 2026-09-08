@@ -118,6 +118,7 @@ export async function startVirtualGame(options: {
   let cleanupGameEnvironment: NodeJS.ProcessEnv | null = null;
   let cleanupSteamEnvironment: NodeJS.ProcessEnv | null = null;
   let restoreGameDisplayConfig: (() => Promise<void>) | null = null;
+  let restoreCommunityMods: (() => Promise<void>) | null = null;
 
   try {
     const hostEnvironment = await waitForJsonEnvironment(
@@ -168,6 +169,11 @@ export async function startVirtualGame(options: {
       await stopProtonPrefix(proton, gameEnvironment);
     }
     restoreGameDisplayConfig = await prepareGameDisplayConfig({
+      game: options.game,
+      compatDataDirectory: gameEnvironment.STEAM_COMPAT_DATA_PATH!,
+      runtimeDirectory: options.runtimeDirectory,
+    });
+    restoreCommunityMods = await prepareCommunityMods({
       game: options.game,
       compatDataDirectory: gameEnvironment.STEAM_COMPAT_DATA_PATH!,
       runtimeDirectory: options.runtimeDirectory,
@@ -285,6 +291,7 @@ export async function startVirtualGame(options: {
           stopProcessGroup(steamProcess, "SIGTERM");
           await ensureSteamStopped();
         }
+        await restoreCommunityMods?.();
         await restoreGameDisplayConfig?.();
         stopProcessGroup(cageProcess, "SIGTERM");
         await delay(1_000);
@@ -303,6 +310,7 @@ export async function startVirtualGame(options: {
     if (proton && cleanupGameEnvironment) {
       await stopProtonPrefix(proton, cleanupGameEnvironment);
     }
+    await restoreCommunityMods?.().catch(() => undefined);
     await restoreGameDisplayConfig?.().catch(() => undefined);
     for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");
     await rm(waylandRuntimeDirectory, { recursive: true, force: true });
@@ -747,6 +755,77 @@ async function prepareGameDisplayConfig(options: {
     originalBase64: original.toString("base64"),
   }));
   await writeFile(filename, configured);
+
+  let restored = false;
+  return async () => {
+    if (restored) return;
+    restored = true;
+    await writeFile(filename, original);
+    await rm(recoveryFilename, { force: true });
+  };
+}
+
+async function prepareCommunityMods(options: {
+  game: InstalledSteamGame;
+  compatDataDirectory: string;
+  runtimeDirectory: string;
+}): Promise<() => Promise<void>> {
+  if (options.game.appId !== "289070") return async () => undefined;
+  const filename = path.join(
+    options.compatDataDirectory,
+    "pfx/drive_c/users/steamuser/AppData/Local/Firaxis Games/" +
+      "Sid Meier's Civilization VI/Mods.sqlite",
+  );
+  if (!existsSync(filename)) return async () => undefined;
+
+  const runDirectory = path.dirname(path.dirname(options.runtimeDirectory));
+  const recoveryFilename = path.join(runDirectory, "community-mods-recovery.json");
+  try {
+    const recovery = JSON.parse(await readFile(recoveryFilename, "utf8")) as {
+      appId?: string;
+      originalBase64?: string;
+    };
+    if (recovery.appId === options.game.appId && recovery.originalBase64) {
+      await writeFile(filename, Buffer.from(recovery.originalBase64, "base64"));
+    }
+    await rm(recoveryFilename, { force: true });
+  } catch {
+    // No interrupted temporary mod state to recover.
+  }
+
+  const sqlite = await runCommand("which", ["sqlite3"], { timeoutMs: 2_000 });
+  if (sqlite.code !== 0) return async () => undefined;
+  const communityPredicate =
+    "lower(replace(s.Path, char(92), '/')) like '%/workshop/content/289070/%'";
+  const count = await runCommand("sqlite3", [filename,
+    `select count(*) from ModGroupItems i join Mods m using(ModRowId) ` +
+      `join ScannedFiles s using(ScannedFileRowId) where i.Disabled=0 and ${communityPredicate};`,
+  ], { timeoutMs: 5_000 });
+  const enabledCommunityMods = Number(count.stdout.toString("utf8").trim());
+  if (count.code !== 0 || !Number.isFinite(enabledCommunityMods) || enabledCommunityMods === 0) {
+    return async () => undefined;
+  }
+
+  const original = await readFile(filename);
+  const backupDirectory = path.join(options.runtimeDirectory, "game-config-backup");
+  await mkdir(backupDirectory, { recursive: true });
+  await writeFile(path.join(backupDirectory, "Mods.sqlite"), original);
+  await writeFile(recoveryFilename, JSON.stringify({
+    version: 1,
+    appId: options.game.appId,
+    filename,
+    originalBase64: original.toString("base64"),
+  }));
+  const update = await runCommand("sqlite3", [filename,
+    `update ModGroupItems set Disabled=1 where ModRowId in (` +
+      `select m.ModRowId from Mods m join ScannedFiles s using(ScannedFileRowId) ` +
+      `where ${communityPredicate});`,
+  ], { timeoutMs: 5_000 });
+  if (update.code !== 0) {
+    await writeFile(filename, original);
+    await rm(recoveryFilename, { force: true });
+    throw new Error(`Could not isolate Civilization VI community mods: ${update.stderr.toString("utf8").trim()}`);
+  }
 
   let restored = false;
   return async () => {
