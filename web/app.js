@@ -13,6 +13,7 @@ const state = {
 
 if (compact) document.body.classList.add("compact");
 if (director) document.body.classList.add("director");
+if (director) byId("frame-time").textContent = "LIVE · 30 FPS";
 
 function formatNumber(value) {
   return new Intl.NumberFormat("en-US").format(Number(value || 0));
