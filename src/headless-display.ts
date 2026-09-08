@@ -117,6 +117,7 @@ export async function startVirtualGame(options: {
   const childProcesses: ChildProcess[] = [cageProcess];
   let cleanupGameEnvironment: NodeJS.ProcessEnv | null = null;
   let cleanupSteamEnvironment: NodeJS.ProcessEnv | null = null;
+  let restoreGameDisplayConfig: (() => Promise<void>) | null = null;
 
   try {
     const hostEnvironment = await waitForJsonEnvironment(
@@ -166,6 +167,11 @@ export async function startVirtualGame(options: {
     if (proton && existsSync(path.join(gameEnvironment.STEAM_COMPAT_DATA_PATH!, "pfx"))) {
       await stopProtonPrefix(proton, gameEnvironment);
     }
+    restoreGameDisplayConfig = await prepareGameDisplayConfig({
+      game: options.game,
+      compatDataDirectory: gameEnvironment.STEAM_COMPAT_DATA_PATH!,
+      runtimeDirectory: options.runtimeDirectory,
+    });
     let steamProcess: ChildProcess | null = null;
     let steamEnvironment: NodeJS.ProcessEnv | null = null;
     if (steamEnabled) {
@@ -278,6 +284,7 @@ export async function startVirtualGame(options: {
           }).catch(() => undefined);
           stopProcessGroup(steamProcess, "SIGTERM");
         }
+        await restoreGameDisplayConfig?.();
         stopProcessGroup(cageProcess, "SIGTERM");
         await delay(1_000);
         for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");
@@ -294,6 +301,7 @@ export async function startVirtualGame(options: {
     if (proton && cleanupGameEnvironment) {
       await stopProtonPrefix(proton, cleanupGameEnvironment);
     }
+    await restoreGameDisplayConfig?.().catch(() => undefined);
     for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");
     await rm(waylandRuntimeDirectory, { recursive: true, force: true });
     throw error;
@@ -671,6 +679,62 @@ async function stopProtonPrefix(
     env: environment,
     timeoutMs: 5_000,
   }).catch(() => undefined);
+}
+
+export function configureCivilizationViDisplay(text: string): string {
+  return text
+    .replace(/^RenderWidth[ \t]+\d+[ \t]*(\r?)$/m, `RenderWidth ${GAME_WIDTH}$1`)
+    .replace(/^RenderHeight[ \t]+\d+[ \t]*(\r?)$/m, `RenderHeight ${VIDEO_HEIGHT}$1`);
+}
+
+async function prepareGameDisplayConfig(options: {
+  game: InstalledSteamGame;
+  compatDataDirectory: string;
+  runtimeDirectory: string;
+}): Promise<() => Promise<void>> {
+  if (options.game.appId !== "289070") return async () => undefined;
+  const filename = path.join(
+    options.compatDataDirectory,
+    "pfx/drive_c/users/steamuser/AppData/Local/Firaxis Games/" +
+      "Sid Meier's Civilization VI/AppOptions.txt",
+  );
+  if (!existsSync(filename)) return async () => undefined;
+
+  const runDirectory = path.dirname(path.dirname(options.runtimeDirectory));
+  const recoveryFilename = path.join(runDirectory, "runtime-config-recovery.json");
+  try {
+    const recovery = JSON.parse(await readFile(recoveryFilename, "utf8")) as {
+      appId?: string;
+      originalBase64?: string;
+    };
+    if (recovery.appId === options.game.appId && recovery.originalBase64) {
+      await writeFile(filename, Buffer.from(recovery.originalBase64, "base64"));
+    }
+  } catch {
+    // No interrupted temporary configuration to recover.
+  }
+
+  const original = await readFile(filename);
+  const configured = configureCivilizationViDisplay(original.toString("utf8"));
+  if (configured === original.toString("utf8")) return async () => undefined;
+  const backupDirectory = path.join(options.runtimeDirectory, "game-config-backup");
+  await mkdir(backupDirectory, { recursive: true });
+  await writeFile(path.join(backupDirectory, "AppOptions.txt"), original);
+  await writeFile(recoveryFilename, JSON.stringify({
+    version: 1,
+    appId: options.game.appId,
+    filename,
+    originalBase64: original.toString("base64"),
+  }));
+  await writeFile(filename, configured);
+
+  let restored = false;
+  return async () => {
+    if (restored) return;
+    restored = true;
+    await writeFile(filename, original);
+    await rm(recoveryFilename, { force: true });
+  };
 }
 
 function logChildOutput(child: ChildProcess, filename: string): void {

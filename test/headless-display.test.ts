@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   applyGpuPreference,
+  configureCivilizationViDisplay,
   continuousGameRecorderArguments,
   dashboardRecorderArguments,
   freeXDisplay,
@@ -34,6 +35,13 @@ test("rejects crash reporters that inherit a game's window class", () => {
   assert.equal(isAuxiliaryGameWindowTitle("Firaxis崩溃报告"), true);
   assert.equal(isAuxiliaryGameWindowTitle("Unity Crash Handler"), true);
   assert.equal(isAuxiliaryGameWindowTitle("Sid Meier's Civilization VI (DX11)"), false);
+});
+
+test("aligns Civilization VI's persisted render size with the private display", () => {
+  assert.equal(
+    configureCivilizationViDisplay("RenderWidth 2560\r\nRenderHeight 1600\r\nFullScreen 1\r\n"),
+    "RenderWidth 1920\r\nRenderHeight 1080\r\nFullScreen 1\r\n",
+  );
 });
 
 test("records the continuous private compositor and dashboard displays", () => {
