@@ -143,3 +143,16 @@ test("pauses quota time and resumes the same state with a new attempt", () => {
     2_000,
   );
 });
+
+test("updates the visible model immediately and emits only for a real change", () => {
+  const state = new ChallengeState("gpt-6-astra");
+  const models: string[] = [];
+  state.on("change", (snapshot) => models.push(snapshot.model));
+
+  state.setModel("gpt-5.6-sol");
+  state.setModel("gpt-5.6-sol");
+
+  assert.equal(state.model, "gpt-5.6-sol");
+  assert.equal(state.snapshot().model, "gpt-5.6-sol");
+  assert.deepEqual(models, ["gpt-5.6-sol"]);
+});

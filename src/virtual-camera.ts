@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { once } from "node:events";
 import { constants } from "node:fs";
 import { access, readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { AuditLog } from "./audit-log.js";
+import { runCommand } from "./command.js";
 import type {
   VirtualDashboardRuntime,
   VirtualGameRuntime,
@@ -62,9 +62,14 @@ export function virtualCameraFfmpegArguments(options: {
   return [
     "-nostdin", "-hide_banner", "-loglevel", "warning",
     "-thread_queue_size", "512",
-    "-f", "matroska",
+    "-fflags", "nobuffer",
+    "-analyzeduration", "0",
+    "-probesize", "32768",
+    "-f", "mpegts",
     "-i", "pipe:0",
     "-thread_queue_size", "512",
+    "-analyzeduration", "0",
+    "-probesize", "32",
     "-f", "x11grab",
     "-draw_mouse", "0",
     "-framerate", String(FPS),
@@ -94,7 +99,7 @@ export function virtualCameraGameRecorderArguments(outputName: string): string[]
     "-p", "tune=zerolatency",
     "-p", "crf=18",
     "-p", "keyint=30",
-    "-m", "matroska",
+    "-m", "mpegts",
     "-f", "pipe:1",
   ];
 }
@@ -126,6 +131,7 @@ export async function startVirtualCamera(options: {
   game: VirtualGameRuntime;
   dashboard: VirtualDashboardRuntime;
   audit: AuditLog;
+  onUnexpectedExit?: (message: string) => void;
 }): Promise<ActiveVirtualCamera> {
   const available = await discoverVirtualCameraDevices();
   const selected = available.find((entry) => entry.device === options.device);
@@ -162,18 +168,35 @@ export async function startVirtualCamera(options: {
   ffmpegProcess.stderr?.on("data", (chunk: Buffer) => {
     void options.audit.appendRaw("virtual-camera-ffmpeg.log", chunk.toString("utf8"));
   });
+  let ready = false;
+  let closing = false;
+  let reported = false;
+  const watch = (source: string, process: ChildProcess) => {
+    process.once("exit", (code, signal) => {
+      if (!ready || closing || reported) return;
+      reported = true;
+      options.onUnexpectedExit?.(
+        `${source} virtual-camera process exited unexpectedly (code=${String(code)}, signal=${String(signal)})`,
+      );
+    });
+  };
+  watch("game capture", gameProcess);
+  watch("ffmpeg", ffmpegProcess);
 
   await delay(1_000);
-  if (gameProcess.exitCode !== null || ffmpegProcess.exitCode !== null) {
+  if (!processRunning(gameProcess) || !processRunning(ffmpegProcess)) {
     await Promise.all([stopProcess(gameProcess), stopProcess(ffmpegProcess)]);
     throw new Error(
       `Virtual camera exited early (capture=${gameProcess.exitCode}, output=${ffmpegProcess.exitCode})`,
     );
   }
+  await waitForCaptureReady(options.device, gameProcess, ffmpegProcess);
+  ready = true;
 
   return {
     device: options.device,
     close: async () => {
+      closing = true;
       gameProcess.stdout?.unpipe(ffmpegProcess.stdin!);
       ffmpegProcess.stdin?.end();
       await Promise.all([stopProcess(ffmpegProcess), stopProcess(gameProcess)]);
@@ -181,13 +204,58 @@ export async function startVirtualCamera(options: {
   };
 }
 
+async function waitForCaptureReady(
+  device: string,
+  gameProcess: ChildProcess,
+  ffmpegProcess: ChildProcess,
+): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    if (!processRunning(gameProcess) || !processRunning(ffmpegProcess)) break;
+    const capabilities = await runCommand("v4l2-ctl", ["--all", "-d", device], {
+      timeoutMs: 2_000,
+    }).catch(() => null);
+    if (
+      capabilities?.code === 0 &&
+      /\bVideo Capture\b/.test(capabilities.stdout.toString("utf8"))
+    ) return;
+    await delay(250);
+  }
+  await Promise.all([stopProcess(gameProcess), stopProcess(ffmpegProcess)]);
+  throw new Error(`Virtual camera ${device} did not become readable within 20 seconds`);
+}
+
 async function stopProcess(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null) return;
+  if (!processRunning(child)) return;
+  const interrupted = waitForExit(child, 4_000);
   signalGroup(child, "SIGINT");
-  await Promise.race([once(child, "exit"), delay(4_000)]).catch(() => undefined);
-  if (child.exitCode === null) signalGroup(child, "SIGTERM");
-  await Promise.race([once(child, "exit"), delay(2_000)]).catch(() => undefined);
-  if (child.exitCode === null) signalGroup(child, "SIGKILL");
+  await interrupted;
+  if (!processRunning(child)) return;
+  const terminated = waitForExit(child, 2_000);
+  signalGroup(child, "SIGTERM");
+  await terminated;
+  if (!processRunning(child)) return;
+  const killed = waitForExit(child, 1_000);
+  signalGroup(child, "SIGKILL");
+  await killed;
+}
+
+function processRunning(child: ChildProcess): boolean {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout;
+    const finish = () => {
+      clearTimeout(timer);
+      child.off("exit", finish);
+      resolve();
+    };
+    child.once("exit", finish);
+    timer = setTimeout(finish, timeoutMs);
+    timer.unref();
+  });
 }
 
 function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {

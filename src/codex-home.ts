@@ -27,6 +27,7 @@ export async function resolveCodexHome(
 
 export function codexEnvironment(
   codexHome: string | undefined,
+  baseCodexHome?: string,
 ): NodeJS.ProcessEnv {
   return codexHome
     ? {
@@ -36,6 +37,8 @@ export function codexEnvironment(
         CODEX_HOME_OVERRIDE: codexHome,
         // codex-proxy uses this for the official authenticated profile.
         CODEX_PROXY_HOME: codexHome,
+        // Keep conversation rollouts and the thread index shared across account profiles.
+        ...(baseCodexHome ? { CODEX_BASE_HOME: baseCodexHome } : {}),
       }
     : process.env;
 }

@@ -111,3 +111,27 @@ test("waits for the later reset when both reserve windows block an account", asy
     retryAtMs: now + 86_400_000,
   });
 });
+
+test("reconfiguration preserves usage and applies a stricter reserve immediately", async () => {
+  const run = await mkdtemp(path.join(os.tmpdir(), "arena-pool-reconfigure-"));
+  const now = Date.parse("2026-09-08T01:00:00Z");
+  const profiles = [
+    profile("a", "a@example.test", "/accounts/a"),
+    profile("b", "b@example.test", "/accounts/b"),
+  ];
+  const pool = await AccountPool.open(run, profiles);
+  assert.equal(pool.choose(now).account?.id, "a");
+  await pool.update("a", {
+    primary: { usedPercent: 40, resetsAtMs: now + 3_600_000 },
+    secondary: { usedPercent: 5, resetsAtMs: now + 86_400_000 },
+  });
+
+  await pool.reconfigure(profiles, [
+    { accountId: "a", enabled: true, reserveFiveHourPercent: 70, reserveWeeklyPercent: 0 },
+    { accountId: "b", enabled: true, reserveFiveHourPercent: 0, reserveWeeklyPercent: 0 },
+  ]);
+
+  assert.equal(pool.shouldStopForReserve("a", now), true);
+  assert.equal(pool.choose(now).account?.id, "b");
+  assert.equal(pool.snapshot(now).accounts.find((account) => account.id === "a")?.primary.usedPercent, 40);
+});

@@ -1,10 +1,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream, existsSync } from "node:fs";
+import { constants, createWriteStream, existsSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./command.js";
 import type { InstalledSteamGame } from "./steam-catalog.js";
+import {
+  prepareSteamLoginMode,
+  SteamLoginStateUnavailableError,
+  type SteamLoginModeLease,
+} from "./steam-offline.js";
 
 const GAME_WIDTH = 1920;
 export const DIRECTOR_WIDTH = 1920;
@@ -62,15 +67,72 @@ export interface VirtualDashboardRuntime {
   close(): Promise<void>;
 }
 
-export type GameLaunchStrategy = "direct-offline" | "direct-steam-assisted" | "steam-managed";
+export type GameLaunchStrategy =
+  | "direct-offline"
+  | "direct-steam-assisted"
+  | "steam-managed"
+  | "steam-managed-offline";
 
 export function gameLaunchStrategy(
   game: Pick<InstalledSteamGame, "appId">,
-  offlineMode = false,
+  offlineModeOrMode: boolean | "steam-online" | "steam-offline" | "direct" = false,
 ): GameLaunchStrategy {
-  if (offlineMode) return "direct-offline";
+  if (offlineModeOrMode === true || offlineModeOrMode === "direct") return "direct-offline";
+  if (offlineModeOrMode === "steam-offline") return "steam-managed-offline";
   if (game.appId === "1260520") return "direct-steam-assisted";
   return "steam-managed";
+}
+
+export function shouldDirectLaunchGame(strategy: GameLaunchStrategy): boolean {
+  return strategy === "direct-offline" || strategy === "direct-steam-assisted";
+}
+
+export class VirtualGameStartupAbortedError extends Error {
+  override name = "AbortError";
+
+  constructor(reason?: unknown) {
+    super("Virtual game startup was cancelled", reason === undefined ? undefined : { cause: reason });
+  }
+}
+
+export async function abortableDelay(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfStartupAborted(signal);
+  if (!signal) {
+    await delay(milliseconds);
+    return;
+  }
+  const activeSignal = signal;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(finish, milliseconds);
+    const abort = () => {
+      clearTimeout(timer);
+      activeSignal.removeEventListener("abort", abort);
+      reject(new VirtualGameStartupAbortedError(activeSignal.reason));
+    };
+    function finish() {
+      activeSignal.removeEventListener("abort", abort);
+      resolve();
+    }
+    activeSignal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+export async function runCleanupSteps(
+  steps: Array<() => void | Promise<void>>,
+  message: string,
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const step of steps) {
+    try {
+      await step();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) throw new AggregateError(errors, message);
 }
 
 export async function startVirtualGame(options: {
@@ -78,8 +140,11 @@ export async function startVirtualGame(options: {
   runtimeDirectory: string;
   game: InstalledSteamGame;
   gpuPreference?: "auto" | "integrated" | "discrete";
+  launchMode?: "steam-online" | "steam-offline" | "direct";
   offlineMode?: boolean;
+  signal?: AbortSignal;
 }): Promise<VirtualGameRuntime> {
+  throwIfStartupAborted(options.signal);
   await mkdir(options.runtimeDirectory, { recursive: true });
   const xvfb = await resolveTool(
     "Xvfb",
@@ -94,10 +159,20 @@ export async function startVirtualGame(options: {
   // Parabox has a verified direct-Proton adapter.  Offline mode deliberately
   // extends that direct launch to any selected game and never starts Steam;
   // Steamworks/DRM-dependent titles are expected to reject that mode cleanly.
-  const launchStrategy = gameLaunchStrategy(options.game, options.offlineMode);
+  const launchStrategy = gameLaunchStrategy(
+    options.game,
+    options.launchMode ?? (options.offlineMode === true ? "direct" : false),
+  );
   const steamEnabled = launchStrategy !== "direct-offline";
-  const directExecutableLaunch = launchStrategy !== "steam-managed";
-  const steamManagedLaunch = launchStrategy === "steam-managed";
+  const directExecutableLaunch = shouldDirectLaunchGame(launchStrategy);
+  const steamManagedLaunch = launchStrategy === "steam-managed" ||
+    launchStrategy === "steam-managed-offline";
+  const steamOfflineLaunch = launchStrategy === "steam-managed-offline";
+  const steamRoot = path.join(process.env.HOME ?? os.homedir(), ".local/share/Steam");
+  if (steamManagedLaunch && options.game.appId === "289070") {
+    await validateCivilizationViDx11Launch(steamRoot);
+  }
+  throwIfStartupAborted(options.signal);
   // Resolve Proton for every Windows launch, including Steam-managed games.
   // Steam can detach Wine descendants from the `steam` launcher process group;
   // keeping the Proton command available lets us clean that game's prefix both
@@ -149,14 +224,18 @@ export async function startVirtualGame(options: {
   const childProcesses: ChildProcess[] = [cageProcess];
   let cleanupGameEnvironment: NodeJS.ProcessEnv | null = null;
   let cleanupSteamEnvironment: NodeJS.ProcessEnv | null = null;
+  let steamLoginLease: SteamLoginModeLease | null = null;
   let restoreGameDisplayConfig: (() => Promise<void>) | null = null;
   let restoreCommunityMods: (() => Promise<void>) | null = null;
+  let steamProcess: ChildProcess | null = null;
+  let steamEnvironment: NodeJS.ProcessEnv | null = null;
 
   try {
     const hostEnvironment = await waitForJsonEnvironment(
       environmentFile,
       cageProcess,
       30_000,
+      options.signal,
     );
     const display = hostEnvironment.DISPLAY;
     if (!display || !hostEnvironment.WAYLAND_DISPLAY) {
@@ -166,7 +245,6 @@ export async function startVirtualGame(options: {
       ...runtimeEnvironment,
       ...hostEnvironment,
     };
-    const steamRoot = path.join(process.env.HOME ?? "", ".local/share/Steam");
     const gameEnvironment: NodeJS.ProcessEnv = {
       ...childEnvironment,
       STEAM_COMPAT_DATA_PATH: path.join(steamRoot, "steamapps/compatdata", options.game.appId),
@@ -189,6 +267,7 @@ export async function startVirtualGame(options: {
     if (outputResult.code !== 0) {
       throw new Error(`Cannot inspect private recording output: ${outputResult.stderr.toString("utf8").trim()}`);
     }
+    throwIfStartupAborted(options.signal);
     const outputs = JSON.parse(outputResult.stdout.toString("utf8")) as Array<{ name?: string }>;
     const captureOutput = outputs[0]?.name;
     if (!captureOutput) throw new Error("Private recording output is unavailable");
@@ -210,8 +289,7 @@ export async function startVirtualGame(options: {
       compatDataDirectory: gameEnvironment.STEAM_COMPAT_DATA_PATH!,
       runtimeDirectory: options.runtimeDirectory,
     });
-    let steamProcess: ChildProcess | null = null;
-    let steamEnvironment: NodeJS.ProcessEnv | null = null;
+    throwIfStartupAborted(options.signal);
     if (steamEnabled) {
       steamEnvironment = {
         ...childEnvironment,
@@ -219,6 +297,18 @@ export async function startVirtualGame(options: {
         PROTON_LOG_DIR: options.runtimeDirectory,
       };
       cleanupSteamEnvironment = steamEnvironment;
+      try {
+        // Keep the selected Steam mode scoped to this private runtime.  This
+        // also prevents a user's previous offline flag from leaking into an
+        // explicitly requested online launch.
+        steamLoginLease = await prepareSteamLoginMode(steamRoot, steamOfflineLaunch);
+      } catch (error) {
+        if (steamOfflineLaunch || !(error instanceof SteamLoginStateUnavailableError)) {
+          throw error;
+        }
+        // Online Steam can still start for a profile without the optional
+        // cached-mode keys; there is simply nothing to restore in that case.
+      }
       if (directExecutableLaunch) {
         const steamDisplay = await freeXDisplay(170, 199);
         const steamXvfbProcess = spawn(
@@ -231,31 +321,33 @@ export async function startVirtualGame(options: {
           path.join(options.runtimeDirectory, "steam-xvfb.log"),
         );
         childProcesses.push(steamXvfbProcess);
-        await waitForXDisplay(steamDisplay, steamXvfbProcess, 15_000);
+        await waitForXDisplay(steamDisplay, steamXvfbProcess, 15_000, options.signal);
         steamEnvironment.DISPLAY = steamDisplay;
       }
       // Force Steam and its game child onto a private X display.  In
       // particular, do not let a native Wayland Steam client discover niri.
       delete steamEnvironment.WAYLAND_DISPLAY;
-      steamProcess = spawn("steam", [
+      const steamArguments = [
         "-inhibitbootstrap",
         "-skipinitialbootstrap",
         "-nobootstrapperupdate",
         "-noverifyfiles",
         "-silent",
-      ], {
+        ...(steamOfflineLaunch ? ["-offline"] : []),
+      ];
+      steamProcess = spawn("steam", steamArguments, {
         env: steamEnvironment,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
       logChildOutput(steamProcess, path.join(options.runtimeDirectory, "steam.log"));
       childProcesses.push(steamProcess);
-      await waitForSteamReady(steamProcess, 30 * 60_000);
+      await waitForSteamReady(steamProcess, 30 * 60_000, options.signal);
 
       // Sending -applaunch during a cold Steam startup can be replayed by both
       // the updater and the final client.  Hand it to the ready client once.
       if (steamManagedLaunch) {
-        await delay(5_000);
+        await abortableDelay(5_000, options.signal);
         const launchProcess = spawn("steam", [
           "-applaunch", options.game.appId,
           "-screen-fullscreen", "0",
@@ -290,7 +382,7 @@ export async function startVirtualGame(options: {
       );
       logChildOutput(gameProcess, path.join(options.runtimeDirectory, "game.log"));
       childProcesses.push(gameProcess);
-      await delay(1_500);
+      await abortableDelay(1_500, options.signal);
       if (gameProcess.exitCode !== null) {
         throw new Error(
           `Game process exited before creating a window (code=${gameProcess.exitCode}); ` +
@@ -298,6 +390,7 @@ export async function startVirtualGame(options: {
         );
       }
     }
+    throwIfStartupAborted(options.signal);
 
     return {
       display,
@@ -312,40 +405,60 @@ export async function startVirtualGame(options: {
         environment: captureEnvironment,
       },
       close: async () => {
-        if (gameProcess) stopProcessGroup(gameProcess, "SIGTERM");
-        await delay(500);
-        if (proton) await stopProtonPrefix(proton, gameEnvironment);
-        if (steamProcess && steamEnvironment) {
-          await runCommand("steam", ["-shutdown"], {
-            env: steamEnvironment,
-            timeoutMs: 5_000,
-          }).catch(() => undefined);
-          stopProcessGroup(steamProcess, "SIGTERM");
-          await ensureSteamStopped();
-        }
-        await restoreCommunityMods?.();
-        await restoreGameDisplayConfig?.();
-        stopProcessGroup(cageProcess, "SIGTERM");
-        await delay(1_000);
-        for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");
-        await rm(waylandRuntimeDirectory, { recursive: true, force: true });
+        await runCleanupSteps([
+          () => { if (gameProcess) stopProcessGroup(gameProcess, "SIGTERM"); },
+          () => delay(500),
+          () => proton ? stopProtonPrefix(proton, gameEnvironment) : undefined,
+          async () => {
+            if (!steamProcess || !steamEnvironment) return;
+            await runCommand("steam", ["-shutdown"], {
+              env: steamEnvironment,
+              timeoutMs: 5_000,
+            }).catch(() => undefined);
+          },
+          () => { if (steamProcess) stopProcessGroup(steamProcess, "SIGTERM"); },
+          () => steamProcess ? ensureSteamStopped() : undefined,
+          () => steamLoginLease?.restore(),
+          () => restoreCommunityMods?.(),
+          () => restoreGameDisplayConfig?.(),
+          () => stopProcessGroup(cageProcess, "SIGTERM"),
+          () => delay(1_000),
+          () => { for (const child of childProcesses) stopProcessGroup(child, "SIGKILL"); },
+          () => rm(waylandRuntimeDirectory, { recursive: true, force: true }),
+        ], "Virtual game teardown was incomplete");
       },
     };
   } catch (error) {
-    if (cleanupSteamEnvironment) {
-      await runCommand("steam", ["-shutdown"], {
-        env: cleanupSteamEnvironment,
-        timeoutMs: 5_000,
-      }).catch(() => undefined);
-      await ensureSteamStopped();
+    try {
+      await runCleanupSteps([
+        async () => {
+          if (!cleanupSteamEnvironment) return;
+          await runCommand("steam", ["-shutdown"], {
+            env: cleanupSteamEnvironment,
+            timeoutMs: 5_000,
+          }).catch(() => undefined);
+        },
+        () => { if (steamProcess) stopProcessGroup(steamProcess, "SIGTERM"); },
+        () => cleanupSteamEnvironment ? ensureSteamStopped() : undefined,
+        () => steamLoginLease?.restore(),
+        () => proton && cleanupGameEnvironment
+          ? stopProtonPrefix(proton, cleanupGameEnvironment)
+          : undefined,
+        () => restoreCommunityMods?.(),
+        () => restoreGameDisplayConfig?.(),
+        () => { for (const child of childProcesses) stopProcessGroup(child, "SIGKILL"); },
+        () => rm(waylandRuntimeDirectory, { recursive: true, force: true }),
+      ], "Virtual game startup cleanup was incomplete");
+    } catch (cleanupError) {
+      const cleanupErrors = cleanupError instanceof AggregateError
+        ? cleanupError.errors
+        : [cleanupError];
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "Virtual game startup failed and cleanup was incomplete",
+        { cause: error },
+      );
     }
-    if (proton && cleanupGameEnvironment) {
-      await stopProtonPrefix(proton, cleanupGameEnvironment);
-    }
-    await restoreCommunityMods?.().catch(() => undefined);
-    await restoreGameDisplayConfig?.().catch(() => undefined);
-    for (const child of childProcesses) stopProcessGroup(child, "SIGKILL");
-    await rm(waylandRuntimeDirectory, { recursive: true, force: true });
     throw error;
   }
 }
@@ -546,15 +659,19 @@ async function ensureX11Anchor(rootDirectory: string): Promise<string> {
 async function waitForSteamReady(
   steamProcess: ChildProcess,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    throwIfStartupAborted(signal);
     if (steamProcess.exitCode !== null) {
       throw new Error(`Steam exited before becoming ready (${steamProcess.exitCode})`);
     }
-    const webHelper = await runCommand("pgrep", ["-f", "/steamwebhelper"]);
+    const webHelper = await runCommand("pgrep", ["-f", "/steamwebhelper"], {
+      timeoutMs: 1_000,
+    });
     if (webHelper.code === 0) return;
-    await delay(1_000);
+    await abortableDelay(1_000, signal);
   }
   throw new Error("Steam did not become ready within 30 minutes");
 }
@@ -608,16 +725,18 @@ async function waitForJsonEnvironment(
   filename: string,
   process: ChildProcess,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<Record<string, string>> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
+    throwIfStartupAborted(signal);
     if (process.exitCode !== null) throw new Error("Private compositor exited before it was ready");
     try {
       return JSON.parse(await readFile(filename, "utf8")) as Record<string, string>;
     } catch (error) {
       lastError = error;
-      await delay(100);
+      await abortableDelay(100, signal);
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Private compositor startup timed out");
@@ -627,15 +746,17 @@ async function waitForXDisplay(
   display: string,
   process: ChildProcess,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    throwIfStartupAborted(signal);
     if (process.exitCode !== null) throw new Error("Xvfb exited before it was ready");
     const result = await runCommand("xprop", ["-display", display, "-root"], {
       timeoutMs: 1_000,
     });
     if (result.code === 0) return;
-    await delay(100);
+    await abortableDelay(100, signal);
   }
   throw new Error("Xvfb startup timed out");
 }
@@ -702,7 +823,13 @@ async function ensureSteamStopped(): Promise<void> {
   if (await waitUntilStopped(3_000)) return;
   await runCommand("pkill", ["-KILL", "-x", "steam"], { timeoutMs: 2_000 })
     .catch(() => undefined);
-  await waitUntilStopped(2_000);
+  if (!(await waitUntilStopped(2_000))) {
+    throw new Error("Steam did not stop during virtual game teardown");
+  }
+}
+
+function throwIfStartupAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new VirtualGameStartupAbortedError(signal.reason);
 }
 
 function withoutPhysicalDisplay(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -740,6 +867,112 @@ async function stopProtonPrefix(
     env: environment,
     timeoutMs: 5_000,
   }).catch(() => undefined);
+}
+
+interface VdfObject {
+  [key: string]: string | VdfObject;
+}
+
+export async function validateCivilizationViDx11Launch(steamRoot: string): Promise<void> {
+  const loginUsersPath = path.join(steamRoot, "config", "loginusers.vdf");
+  const loginUsers = parseVdf(await readFile(loginUsersPath, "utf8"));
+  const users = objectValue(loginUsers.users);
+  const cachedUsers = users
+    ? Object.entries(users).filter((entry): entry is [string, VdfObject] =>
+        objectValue(entry[1]) !== null
+      ).map(([steamId, value]) => [steamId, value as VdfObject] as const)
+    : [];
+  const steamId = cachedUsers.find(([, value]) => value.MostRecent === "1")?.[0] ??
+    cachedUsers.find(([, value]) => value.AutoLogin === "1")?.[0] ??
+    (cachedUsers.length === 1 ? cachedUsers[0]?.[0] : undefined);
+  if (!steamId || !/^\d+$/.test(steamId)) {
+    throw new Error("Civilization VI DX11 launch requires an unambiguous cached Steam user");
+  }
+
+  const accountId = (BigInt(steamId) & 0xffff_ffffn).toString();
+  const localConfigPath = path.join(
+    steamRoot,
+    "userdata",
+    accountId,
+    "config",
+    "localconfig.vdf",
+  );
+  const localConfig = parseVdf(await readFile(localConfigPath, "utf8").catch(() => {
+    throw new Error("Civilization VI DX11 Steam launch configuration is missing");
+  }));
+  const launchOptions = findAppLaunchOptions(localConfig, "289070");
+  if (!launchOptions) {
+    throw new Error("Civilization VI DX11 Steam LaunchOptions are missing");
+  }
+  const wrapperToken = /(?:^|\s)(?:"([^"]+)"|'([^']+)'|(\S+))\s+%command%(?=\s|$)/
+    .exec(launchOptions);
+  const wrapper = wrapperToken?.[1] ?? wrapperToken?.[2] ?? wrapperToken?.[3];
+  if (!wrapper || !path.isAbsolute(wrapper)) {
+    throw new Error("Civilization VI DX11 LaunchOptions must wrap %command% with an absolute script path");
+  }
+  try {
+    await access(wrapper, constants.R_OK | constants.X_OK);
+  } catch {
+    throw new Error("Civilization VI DX11 launch wrapper is missing or not executable");
+  }
+  const script = (await readFile(wrapper, "utf8"))
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*#.*$/, ""))
+    .join("\n");
+  if (
+    !/\[\[[^\n]*CivilizationVI_DX12\.exe[^\n]*\]\]/i.test(script) ||
+    !/args\[[^\n]+\]\s*=\s*"\$\{args\[[^\n]+\]%_DX12\.exe\}\.exe"/i.test(script) ||
+    !/\bexec\s+"\$\{args\[@\]\}"/.test(script)
+  ) {
+    throw new Error("Civilization VI launch wrapper does not replace the DX12 executable with DX11");
+  }
+}
+
+function parseVdf(source: string): VdfObject {
+  const tokens = [...source.matchAll(/"((?:\\.|[^"\\])*)"|([{}])/g)].map((match) =>
+    match[2] ?? decodeVdfString(match[1] ?? "")
+  );
+  let cursor = 0;
+  const readObject = (nested: boolean): VdfObject => {
+    const result: VdfObject = {};
+    while (cursor < tokens.length) {
+      const key = tokens[cursor++];
+      if (key === "}") {
+        if (!nested) throw new Error("Unexpected closing brace in Steam VDF");
+        return result;
+      }
+      if (!key || key === "{") throw new Error("Invalid Steam VDF key");
+      const value = tokens[cursor++];
+      if (value === "{") result[key] = readObject(true);
+      else if (value !== undefined && value !== "}") result[key] = value;
+      else throw new Error("Invalid Steam VDF value");
+    }
+    if (nested) throw new Error("Unclosed object in Steam VDF");
+    return result;
+  };
+  return readObject(false);
+}
+
+function decodeVdfString(value: string): string {
+  return value.replace(/\\(["\\])/g, "$1");
+}
+
+function objectValue(value: string | VdfObject | undefined): VdfObject | null {
+  return value !== undefined && typeof value === "object" ? value : null;
+}
+
+function findAppLaunchOptions(value: VdfObject, appId: string): string | null {
+  for (const [key, child] of Object.entries(value)) {
+    const object = objectValue(child);
+    if (key === appId && object && typeof object.LaunchOptions === "string") {
+      return object.LaunchOptions;
+    }
+    if (object) {
+      const nested = findAppLaunchOptions(object, appId);
+      if (nested) return nested;
+    }
+  }
+  return null;
 }
 
 export function configureCivilizationViDisplay(text: string): string {

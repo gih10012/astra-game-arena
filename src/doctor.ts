@@ -104,6 +104,7 @@ export async function runDoctor(options: { codexHome?: string } = {}): Promise<D
     commandCheck("wlr-randr"),
     commandCheck("grim"),
     commandCheck("wf-recorder"),
+    commandCheck("v4l2-ctl", false),
     commandCheck("google-chrome-stable"),
     commandCheck("steam"),
     fileCheck("Parabox manifest adapter", paths.manifest, false),

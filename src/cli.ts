@@ -85,6 +85,14 @@ if (command === "doctor") {
   const requestedCodexHome = optionalPathArg(args, "--codex-home");
   const quotaWaitHours = numberArg(args, "--quota-wait-hours", 5);
   if (quotaWaitHours <= 0) throw new Error("--quota-wait-hours must be positive");
+  const launchMode = stringArg(
+    args,
+    "--launch-mode",
+    args.includes("--offline") ? "direct" : "steam-online",
+  ) as "steam-online" | "steam-offline" | "direct";
+  if (!["steam-online", "steam-offline", "direct"].includes(launchMode)) {
+    throw new Error("--launch-mode must be steam-online, steam-offline, or direct");
+  }
   const runOptions: RunOptions = {
     rootDirectory,
     publicPort: numberArg(args, "--port", 4317),
@@ -92,7 +100,8 @@ if (command === "doctor") {
     model: stringArg(args, "--model", "gpt-6-astra"),
     gameAppId: stringArg(args, "--game", "1260520"),
     gpuPreference: stringArg(args, "--gpu", "auto") as "auto" | "integrated" | "discrete",
-    offlineMode: args.includes("--offline"),
+    launchMode,
+    offlineMode: launchMode === "direct",
     goal: stringArg(args, "--goal", "Complete all official levels in Patrick's Parabox."),
     reasoningEffort: reasoning,
     record: !args.includes("--no-record"),

@@ -219,6 +219,38 @@ export class AccountPool {
     await this.persist();
   }
 
+  async reconfigure(
+    profiles: CodexAccountProfile[],
+    policies: AccountPolicy[],
+  ): Promise<void> {
+    const prior = new Map(this.#state.accounts.map((account) => [account.id, account]));
+    const configured = new Map(policies.map((policy) => [policy.accountId, policy]));
+    this.#state.accounts = profiles
+      .filter((profile) => configured.get(profile.id)?.enabled !== false)
+      .map((profile) => {
+        const old = prior.get(profile.id);
+        const policy = configured.get(profile.id);
+        return {
+          ...profile,
+          reserveFiveHourPercent: boundedPercent(
+            policy?.reserveFiveHourPercent ?? old?.reserveFiveHourPercent ?? 0,
+          ),
+          reserveWeeklyPercent: boundedPercent(
+            policy?.reserveWeeklyPercent ?? old?.reserveWeeklyPercent ?? 0,
+          ),
+          primary: old?.primary ?? unknownWindow(),
+          secondary: old?.secondary ?? unknownWindow(),
+          blockedUntilMs: old?.blockedUntilMs ?? null,
+          lastPrimaryResetAtMs: old?.lastPrimaryResetAtMs ?? null,
+          updatedAt: old?.updatedAt ?? null,
+        };
+      });
+    if (!this.#state.accounts.some((account) => account.id === this.#state.activeAccountId)) {
+      this.#state.activeAccountId = null;
+    }
+    await this.persist();
+  }
+
   shouldStopForReserve(accountId: string, nowMs = Date.now()): boolean {
     this.#normalize(nowMs);
     const active = this.#state.accounts.find((entry) => entry.id === accountId);

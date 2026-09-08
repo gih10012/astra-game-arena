@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { extractQuotaResetAt } from "../src/codex-events.js";
 import { codexEnvironment } from "../src/codex-home.js";
@@ -6,6 +10,7 @@ import {
   codexArguments,
   isQuotaError,
   extractQuotaResetAtFromText,
+  ensureCodexThreadInBase,
   NEUTRAL_PROMPT,
   quotaRetryAt,
   RESUME_PROMPT,
@@ -46,10 +51,37 @@ test("disables search and browsers while retaining normal Codex capabilities", (
 });
 
 test("passes the selected credential home through the local Codex launcher", () => {
-  const env = codexEnvironment("/credentials/codex");
+  const env = codexEnvironment("/credentials/codex", "/credentials/base");
   assert.equal(env.CODEX_HOME, "/credentials/codex");
   assert.equal(env.CODEX_HOME_OVERRIDE, "/credentials/codex");
   assert.equal(env.CODEX_PROXY_HOME, "/credentials/codex");
+  assert.equal(env.CODEX_BASE_HOME, "/credentials/base");
+});
+
+test("recovers a newer account thread and sqlite index into the shared base", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "codex-thread-base-"));
+  const base = path.join(root, "base");
+  const profile = path.join(root, "profile");
+  const threadId = "00000000-0000-0000-0000-000000000321";
+  const relative = path.join("sessions", "2026", "09", "08", `rollout-${threadId}.jsonl`);
+  await mkdir(path.dirname(path.join(profile, relative)), { recursive: true });
+  await writeFile(
+    path.join(profile, relative),
+    `${JSON.stringify({ type: "session_meta", payload: { id: threadId }, model_provider: "openai" })}\n`,
+  );
+  execFileSync("sqlite3", [
+    path.join(profile, "state_5.sqlite"),
+    `CREATE TABLE threads(id TEXT PRIMARY KEY, model_provider TEXT);` +
+      `INSERT INTO threads VALUES('${threadId}','openai');`,
+  ]);
+
+  await ensureCodexThreadInBase(threadId, base, [{ home: profile }]);
+
+  const indexed = execFileSync("sqlite3", [
+    path.join(base, "state_5.sqlite"),
+    `SELECT model_provider FROM threads WHERE id='${threadId}';`,
+  ], { encoding: "utf8" }).trim();
+  assert.equal(indexed, "openai");
 });
 
 test("resumes the same Codex thread with the constrained continuation prompt", () => {

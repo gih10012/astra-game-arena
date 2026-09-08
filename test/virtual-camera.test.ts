@@ -18,6 +18,8 @@ test("builds a live 1920x1080 V4L2 composition without touching a real camera", 
     device: "/dev/video10",
   });
   assert.equal(output.at(-1), "/dev/video10");
+  assert.equal(output[output.indexOf("-i") - 1], "mpegts");
+  assert.equal(output[output.indexOf("-fflags") + 1], "nobuffer");
   assert.equal(output[output.indexOf("-f", output.indexOf("pipe:0")) + 1], "x11grab");
   assert.ok(output.includes("1920x1080"));
   assert.ok(output.join(" ").includes("overlay=20:200"));

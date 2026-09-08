@@ -1,5 +1,6 @@
 const byId = (id) => document.getElementById(id);
 const compact = new URLSearchParams(location.search).get("compact") === "1";
+const director = new URLSearchParams(location.search).get("director") === "1";
 const state = {
   snapshot: null,
   supervisor: null,
@@ -11,6 +12,7 @@ const state = {
 };
 
 if (compact) document.body.classList.add("compact");
+if (director) document.body.classList.add("director");
 
 function formatNumber(value) {
   return new Intl.NumberFormat("en-US").format(Number(value || 0));
@@ -194,7 +196,7 @@ function replaceTranscript(records) {
 }
 
 function showFrame(version = Date.now()) {
-  if (state.livePreviewDevice) return;
+  if (director || state.livePreviewDevice) return;
   const image = byId("game-frame");
   image.dataset.mode = "snapshot";
   image.src = `/api/frame?v=${encodeURIComponent(version)}`;
@@ -204,6 +206,7 @@ function showFrame(version = Date.now()) {
 }
 
 function updateLivePreview(camera) {
+  if (director) return;
   const device = camera?.active ? camera.device : null;
   if (device && state.livePreviewDevice === device) return;
   const image = byId("game-frame");
@@ -230,16 +233,10 @@ async function loadOptions() {
   const modelSelect = byId("model-select");
   modelSelect.replaceChildren(...state.options.models.map((model) => new Option(model.displayName, model.slug)));
   modelSelect.value = state.options.defaults.model;
-  byId("goal-input").value = state.options.defaults.goal;
-  byId("gpu-select").value = state.options.defaults.gpuPreference;
-  byId("offline-mode-toggle").checked = state.options.defaults.offlineMode;
-  byId("record-toggle").checked = state.options.defaults.record;
-  byId("virtual-camera-toggle").checked = state.options.defaults.virtualCamera;
-  renderVirtualCameras();
-  renderReasoningOptions(); renderAccounts(); updateGameDetail();
+  applyConfigurationToForm(state.options.defaults);
 }
 
-function renderVirtualCameras() {
+function renderVirtualCameras(configuredDevice) {
   const select = byId("virtual-camera-select");
   const cameras = state.options?.virtualCameras || [];
   select.replaceChildren(...cameras.map((camera) =>
@@ -248,9 +245,8 @@ function renderVirtualCameras() {
   if (!cameras.length) {
     select.append(new Option("未检测到 V4L2 loopback 设备", "/dev/video10"));
   }
-  select.value = cameras.some((camera) =>
-    camera.device === state.options.defaults.virtualCameraDevice
-  ) ? state.options.defaults.virtualCameraDevice : cameras[0]?.device || "/dev/video10";
+  select.value = cameras.some((camera) => camera.device === configuredDevice)
+    ? configuredDevice : cameras[0]?.device || "/dev/video10";
   byId("virtual-camera-toggle").disabled = !cameras.some((camera) => camera.writable);
   byId("virtual-camera-detail").textContent = cameras.length
     ? "输出正式片同款 1920×1080 / 30 fps 合成画面"
@@ -273,21 +269,66 @@ function renderReasoningOptions() {
   select.value = efforts.includes(current) ? current : model?.defaultReasoningEffort || efforts[0];
 }
 
-function renderAccounts() {
+function renderAccounts(policies = []) {
   const container = byId("account-pool"); container.replaceChildren();
+  const configured = new Map(policies.map((policy) => [policy.accountId, policy]));
   for (const account of state.options.accounts) {
     const row = document.createElement("div"); row.className = "account-row"; row.dataset.accountId = account.id;
-    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = true; enabled.className = "account-enabled";
+    const policy = configured.get(account.id);
+    const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = policy?.enabled !== false; enabled.className = "account-enabled";
     const identity = document.createElement("div"); identity.className = "account-name";
     const email = document.createElement("b"); email.textContent = account.email;
     const label = document.createElement("small"); label.textContent = account.label;
     identity.append(email, label);
-    row.append(enabled, identity, quotaInput("保留 5h", "reserveFiveHour", 0), quotaInput("保留 weekly", "reserveWeekly", 0));
+    row.append(
+      enabled,
+      identity,
+      quotaInput("保留 5h", "reserveFiveHour", policy?.reserveFiveHourPercent || 0),
+      quotaInput("保留 weekly", "reserveWeekly", policy?.reserveWeeklyPercent || 0),
+    );
     container.append(row);
   }
   if (!state.options.accounts.length) {
     const empty = document.createElement("p"); empty.textContent = "未发现独立 Codex 账号目录；将使用默认官方凭据。"; container.append(empty);
   }
+}
+
+function applyConfigurationToForm(configured) {
+  if (!configured || !state.options) return;
+  const gameAppId = configured.gameAppId || configured.game?.appId || state.options.defaults.gameAppId;
+  if (![...byId("game-select").options].some((option) => option.value === gameAppId)) {
+    byId("game-select").append(new Option(`${configured.game?.name || "当前游戏"} · ${gameAppId}`, gameAppId));
+  }
+  byId("game-select").value = gameAppId;
+  byId("goal-input").value = configured.goal || "";
+  byId("gpu-select").value = configured.gpuPreference || "auto";
+  byId("launch-mode-select").value = configured.launchMode ||
+    (configured.offlineMode ? "direct" : "steam-online");
+  byId("model-select").value = configured.model || state.options.defaults.model;
+  renderReasoningOptions();
+  byId("reasoning-select").value = configured.reasoningEffort || state.options.defaults.reasoningEffort;
+  byId("record-toggle").checked = configured.record !== false;
+  byId("virtual-camera-toggle").checked = configured.virtualCamera === true;
+  renderVirtualCameras(configured.virtualCameraDevice || state.options.defaults.virtualCameraDevice);
+  renderAccounts(configured.accountPolicies || []);
+  updateGameDetail();
+  updateConfigurationMode();
+}
+
+function activeChallenge() {
+  const phase = state.supervisor?.checkpoint?.phase || state.snapshot?.phase || "idle";
+  return Boolean(state.supervisor?.active && !["completed", "failed"].includes(phase));
+}
+
+function updateConfigurationMode() {
+  const active = activeChallenge();
+  byId("game-select").disabled = active;
+  byId("gpu-select").disabled = active;
+  byId("goal-input").disabled = active;
+  byId("start-button").textContent = active ? "保存并立即应用" : "从零开始挑战";
+  byId("configuration-mode-note").textContent = active
+    ? "挑战运行中：目标、游戏和 GPU 已锁定；修改启动方式会自动封片并重启私有游戏运行时。"
+    : "";
 }
 
 function quotaInput(label, className, value) {
@@ -313,25 +354,46 @@ function accountPolicies() {
 
 async function submitChallenge(event) {
   event.preventDefault();
-  byId("start-button").disabled = true; byId("form-message").textContent = "正在排队…";
+  const active = activeChallenge();
+  byId("start-button").disabled = true;
+  byId("form-message").textContent = active ? "正在保存…" : "正在排队…";
   try {
-    await postControl("start", {
-      gameAppId: byId("game-select").value,
-      gpuPreference: byId("gpu-select").value,
-      offlineMode: byId("offline-mode-toggle").checked,
+    const mutable = {
+      launchMode: byId("launch-mode-select").value,
       model: byId("model-select").value,
       reasoningEffort: byId("reasoning-select").value,
-      goal: byId("goal-input").value,
       record: byId("record-toggle").checked,
       virtualCamera: byId("virtual-camera-toggle").checked,
       virtualCameraDevice: byId("virtual-camera-select").value,
       accountPolicies: accountPolicies(),
+    };
+    const result = active
+      ? await patchConfiguration(mutable)
+      : await postControl("start", {
+      gameAppId: byId("game-select").value,
+      gpuPreference: byId("gpu-select").value,
+      goal: byId("goal-input").value,
+      ...mutable,
     });
-    byId("configuration").hidden = true; byId("form-message").textContent = "";
+    const deferred = result?.acknowledgement?.deferredFields || [];
+    byId("form-message").textContent = result?.pending
+      ? "已提交，等待挑战进程完成应用…"
+      : deferred.length
+      ? `已保存；${deferred.join("、")} 将在下次游戏进程恢复时生效。`
+      : active ? "配置已保存并应用。" : "";
+    if (!active) byId("configuration").hidden = true;
     await refreshSupervisor();
   } catch (error) {
     byId("form-message").textContent = error.message;
   } finally { byId("start-button").disabled = false; }
+}
+
+async function patchConfiguration(body) {
+  return await fetch("/api/configuration", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(assertJson);
 }
 
 async function postControl(action, body = {}) {
@@ -357,7 +419,10 @@ async function refreshSupervisor() {
     byId("virtual-camera-state").textContent = camera?.active
       ? `LIVE ${camera.device}`
       : camera?.enabled ? `PAUSED ${camera.device}` : "OFF";
-    updateLivePreview(camera);
+    const runnerLive = Boolean(state.supervisor.active && checkpoint?.pid);
+    updateLivePreview(runnerLive
+      ? { active: true, device: camera?.active ? camera.device : "private-runtime" }
+      : camera);
     updateControls();
   } catch {
     byId("daemon-state").textContent = "RECONNECTING";
@@ -393,8 +458,9 @@ async function bootstrap() {
   const frameResponse = await fetch("/api/frame");
   if (frameResponse.ok && frameResponse.status !== 204) showFrame("initial");
   if (!compact) {
-    await loadOptions(); await refreshSupervisor();
-    if (!state.supervisor?.active) byId("configuration").hidden = false;
+    if (!director) await loadOptions();
+    await refreshSupervisor();
+    if (!director && !state.supervisor?.active) byId("configuration").hidden = false;
     setInterval(refreshSupervisor, 2_000);
   }
 }
@@ -404,6 +470,16 @@ events.addEventListener("state", (event) => applySnapshot(JSON.parse(event.data)
 events.addEventListener("transcript", (event) => addTranscript(JSON.parse(event.data)));
 events.addEventListener("transcript_reset", (event) => replaceTranscript(JSON.parse(event.data)));
 events.addEventListener("frame", (event) => showFrame(JSON.parse(event.data).sha256));
+events.addEventListener("configuration", (event) => {
+  if (director) return;
+  const result = JSON.parse(event.data);
+  if (result.pending) return;
+  byId("form-message").textContent = result.error
+    ? `配置应用失败：${result.error}`
+    : result.deferredFields?.length
+      ? `已保存；${result.deferredFields.join("、")} 将在下次游戏进程恢复时生效。`
+      : "配置已保存并应用。";
+});
 
 byId("game-frame").addEventListener("error", () => {
   const image = byId("game-frame");
@@ -414,7 +490,7 @@ byId("game-frame").addEventListener("error", () => {
   showFrame("live-error");
 });
 
-if (!compact) {
+if (!compact && !director) {
   byId("configure-button").addEventListener("click", () => { byId("configuration").hidden = false; });
   byId("configuration-close").addEventListener("click", () => { byId("configuration").hidden = true; });
   byId("game-select").addEventListener("change", updateGameDetail);

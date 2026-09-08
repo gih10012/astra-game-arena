@@ -61,6 +61,13 @@ import {
   type RunPhase,
   type AccountPolicy,
 } from "./run-checkpoint.js";
+import {
+  readRuntimeMediaState,
+  readRuntimeConfigRequest,
+  writeRuntimeConfigAck,
+  writeRuntimeMediaState,
+  type RuntimeMediaState,
+} from "./runtime-config.js";
 import { SaveGuard } from "./save-guard.js";
 import {
   powerAllowsResume,
@@ -99,6 +106,7 @@ export interface RunOptions {
   goal?: string;
   gameAppId?: string;
   gpuPreference?: "auto" | "integrated" | "discrete";
+  launchMode?: "steam-online" | "steam-offline" | "direct";
   offlineMode?: boolean;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   record?: boolean;
@@ -148,6 +156,8 @@ async function initializeChallenge(
   const game = await findInstalledSteamGame(options.gameAppId ?? "1260520");
   const model = normalizeModel(options.model ?? "gpt-6-astra");
   const goal = normalizeGoal(options.goal ?? DEFAULT_GOAL);
+  const launchMode = options.launchMode ??
+    (options.offlineMode === true ? "direct" : "steam-online");
   const now = new Date().toISOString();
   const persistedOptions: RunCheckpoint["options"] = {
     rootDirectory,
@@ -157,7 +167,8 @@ async function initializeChallenge(
     goal,
     game,
     gpuPreference: options.gpuPreference ?? "auto",
-    offlineMode: options.offlineMode === true,
+    launchMode,
+    offlineMode: launchMode === "direct",
     reasoningEffort: options.reasoningEffort ?? "high",
     record: options.record !== false,
     virtualCamera: options.virtualCamera === true,
@@ -199,6 +210,7 @@ async function initializeChallenge(
     reasoningEffort: persistedOptions.reasoningEffort,
     goal,
     gpuPreference: persistedOptions.gpuPreference,
+    launchMode: persistedOptions.launchMode,
     offlineMode: persistedOptions.offlineMode,
     prompt: initialPrompt(goal, game.name),
     resumePrompt: RESUME_PROMPT,
@@ -343,17 +355,14 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   const isColdResume = prior.attempt > 0;
   const saveGuard = new SaveGuard(paths.saveDirectory, runDirectory);
   const codexHome = prior.options.codexHome;
-  const defaultSessionsRoot = path.join(
-    codexHome ?? path.join(os.homedir(), ".codex"),
-    "sessions",
-  );
-  const accountProfiles = await discoverCodexAccounts();
+  const primaryCodexHome = codexHome ?? path.join(os.homedir(), ".codex");
+  let accountProfiles = await discoverCodexAccounts();
   await Promise.all(
     accountProfiles.map((profile) =>
       inheritCodexConfiguration(profile.home, codexHome),
     ),
   );
-  const accountPool = accountProfiles.length > 0
+  let accountPool = accountProfiles.length > 0
     ? await AccountPool.open(runDirectory, accountProfiles, prior.options.accountPolicies)
     : null;
   await checkpointStore.update({
@@ -384,6 +393,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let gameHealthPoll: NodeJS.Timeout | null = null;
   let powerPoll: NodeJS.Timeout | null = null;
   let accountPoll: NodeJS.Timeout | null = null;
+  let runtimeConfigPoll: NodeJS.Timeout | null = null;
   const checkpointWork: { current: Promise<void> | null } = { current: null };
   let checkpointBusy = false;
   let gameHealthBusy = false;
@@ -394,6 +404,11 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let activeAccountId: string | null = null;
   let reservePauseRequested = false;
   let accountRotationRequested = false;
+  let configurationRestartRequested = false;
+  let configurationRestartAwaitingThread = false;
+  let runtimeConfigBusy = false;
+  let runtimeConfigGeneration = 0;
+  let quotaFallbackStartedAtMs: number | null = null;
   let exitDescription = "Codex exited before completion";
   let requestedStop: "pause" | "restart" | "game-exit" | null = null;
   let powerPauseRequested = false;
@@ -404,11 +419,55 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   let retryAt: string | null = null;
   let reason: string | null = null;
   let productionVideo: RecordingAssembly | null = null;
+  let controllerUrl: string | null = null;
+  const startupAbortController = new AbortController();
+  let mediaOperations: Promise<void> = Promise.resolve();
+  const restoredMediaState = await readRuntimeMediaState(runDirectory);
+  let mediaState: RuntimeMediaState = restoredMediaState ? {
+    ...restoredMediaState,
+    recordingError: restoredMediaState.recordingError ?? restoredMediaState.lastError ?? null,
+    virtualCameraError:
+      restoredMediaState.virtualCameraError ?? restoredMediaState.lastError ?? null,
+  } : {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    recordingActive: false,
+    recordingError: null,
+    virtualCameraActive: false,
+    virtualCameraDevice: null,
+    virtualCameraError: null,
+  };
+  const recordedAttempts = new Set(
+    (prior.recordingPairs ?? []).map((pair) => pair.attempt),
+  );
 
-  const stopRecording = async () => {
+  const updateMediaState = async (patch: Partial<RuntimeMediaState>) => {
+    mediaState = {
+      ...mediaState,
+      ...patch,
+      version: 1,
+      updatedAt: new Date().toISOString(),
+    };
+    await writeRuntimeMediaState(runDirectory, mediaState);
+  };
+  const withMediaOperation = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = mediaOperations.catch(() => undefined).then(operation);
+    mediaOperations = result.then(() => undefined, () => undefined);
+    return await result;
+  };
+  await updateMediaState({
+    recordingActive: false,
+    recordingError: null,
+    virtualCameraActive: false,
+    virtualCameraDevice: null,
+    virtualCameraError: null,
+  });
+
+  const stopRecordingUnlocked = async () => {
     const activeRecorder = recorder;
     recorder = null;
     if (!activeRecorder) return;
+    await updateMediaState({ recordingActive: false });
     try {
       const compositeRelative = await stopAndComposeRecordingPair(
         runDirectory,
@@ -424,38 +483,68 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         filename: compositeRelative,
         gameSource: activeRecorder.metadata.game,
         dashboardSource: activeRecorder.metadata.dashboard,
+        snapshot: state.snapshot(),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      await updateMediaState({ recordingActive: false, recordingError: message });
       await audit.append("recording.seal.warning", {
         attempt: activeRecorder.metadata.attempt,
         message,
       });
       controller?.publishTranscript({ type: "runner.error", message: `Recording part could not be sealed: ${message}` });
+      throw error;
     }
   };
 
-  const startRecording = async (currentAttempt: number) => {
-    if (!prior.options.record || !virtualGame || !virtualDashboard) {
-      return;
+  const startRecordingUnlocked = async (
+    currentAttempt: number,
+    configured: RunCheckpoint["options"],
+    allowStopped: boolean,
+  ): Promise<boolean> => {
+    if (recorder || !configured.record || !virtualGame || !virtualDashboard) {
+      return false;
     }
+    if (!allowStopped && state.snapshot().status !== "running") return false;
+    if (recordedAttempts.has(currentAttempt)) return true;
     const currentPart = String(currentAttempt).padStart(4, "0");
     const recordingRelative = path.join(
       "recordings",
       `challenge-part-${currentPart}.mkv`,
     );
     const captureStartedAt = new Date().toISOString();
-    recorder = await startRecordingPair({
-      runDirectory,
-      attempt: currentAttempt,
-      game: virtualGame,
-      dashboard: virtualDashboard,
-      audit,
-    });
+    let started: ActiveRecordingPair | null = null;
+    try {
+      started = await startRecordingPair({
+        runDirectory,
+        attempt: currentAttempt,
+        game: virtualGame,
+        dashboard: virtualDashboard,
+        audit,
+        onUnexpectedExit: (message) => {
+          void withMediaOperation(async () => {
+            if (recorder !== started) return;
+            await stopRecordingUnlocked().catch(() => undefined);
+            await updateMediaState({ recordingActive: false, recordingError: message });
+            await audit.append("recording.failed", { attempt: currentAttempt, message });
+            controller?.publishTranscript({ type: "runner.error", message });
+          });
+        },
+      });
+      recorder = started;
+      recordedAttempts.add(currentAttempt);
+      await updateMediaState({ recordingActive: true, recordingError: null });
+    } catch (error) {
+      await updateMediaState({
+        recordingActive: false,
+        recordingError: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
     await checkpointStore.update((current) => ({
       recordingPairs: [
         ...(current.recordingPairs ?? []).filter((pair) => pair.attempt !== currentAttempt),
-        recorder!.metadata,
+        started!.metadata,
       ],
     }));
     await audit.append("recording.started", {
@@ -465,37 +554,135 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       framesPerSecond: 30,
       timestampMode: "frame-count",
       captureStartedAt,
+      snapshot: state.snapshot(),
       filename: recordingRelative,
     });
+    return false;
   };
 
-  const stopVirtualCamera = async () => {
+  const stopVirtualCameraUnlocked = async () => {
     const active = virtualCamera;
     virtualCamera = null;
     if (!active) return;
-    await active.close();
+    await updateMediaState({
+      virtualCameraActive: false,
+      virtualCameraDevice: null,
+    });
+    try {
+      await active.close();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await updateMediaState({ virtualCameraError: message });
+      await audit.append("virtual_camera.stop.warning", message);
+      throw error;
+    }
     await audit.append("virtual_camera.stopped", { device: active.device });
   };
 
-  const startCameraOutput = async () => {
-    if (!prior.options.virtualCamera || !virtualGame || !virtualDashboard) return;
-    virtualCamera = await startVirtualCamera({
-      device: prior.options.virtualCameraDevice,
-      game: virtualGame,
-      dashboard: virtualDashboard,
-      audit,
-    });
+  const startCameraOutputUnlocked = async (
+    configured: RunCheckpoint["options"],
+    allowStopped: boolean,
+  ) => {
+    if (virtualCamera || !configured.virtualCamera || !virtualGame || !virtualDashboard) return;
+    if (!allowStopped && state.snapshot().status !== "running") return;
+    let started: ActiveVirtualCamera | null = null;
+    try {
+      started = await startVirtualCamera({
+        device: configured.virtualCameraDevice,
+        game: virtualGame,
+        dashboard: virtualDashboard,
+        audit,
+        onUnexpectedExit: (message) => {
+          void withMediaOperation(async () => {
+            if (virtualCamera !== started) return;
+            await stopVirtualCameraUnlocked().catch(() => undefined);
+            await updateMediaState({
+              virtualCameraActive: false,
+              virtualCameraDevice: null,
+              virtualCameraError: message,
+            });
+            await audit.append("virtual_camera.failed", { message });
+            controller?.publishTranscript({ type: "runner.error", message });
+          });
+        },
+      });
+      virtualCamera = started;
+      await updateMediaState({
+        virtualCameraActive: true,
+        virtualCameraDevice: started.device,
+        virtualCameraError: null,
+      });
+    } catch (error) {
+      await updateMediaState({
+        virtualCameraActive: false,
+        virtualCameraDevice: null,
+        virtualCameraError: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
     await audit.append("virtual_camera.started", {
-      device: virtualCamera.device,
+      device: started.device,
       dimensions: "1920x1080",
       framesPerSecond: 30,
       layout: "native-game-1920x1080-fit-into-1280x1080+codex-session-640x1080",
     });
     controller?.publishTranscript({
       type: "runner.virtual_camera_started",
-      device: virtualCamera.device,
+      device: started.device,
     });
   };
+
+  const ensureVirtualDashboardUnlocked = async () => {
+    if (virtualDashboard || !virtualGame || !controllerUrl) return;
+    virtualDashboard = await startVirtualDashboard({
+      rootDirectory,
+      runtimeDirectory,
+      url: controllerUrl,
+    });
+  };
+  const ensureVirtualDashboard = async () =>
+    await withMediaOperation(ensureVirtualDashboardUnlocked);
+  const stopRecording = async () =>
+    await withMediaOperation(stopRecordingUnlocked);
+  const startRecording = async (currentAttempt: number, allowStopped = false) =>
+    await withMediaOperation(async () =>
+      await startRecordingUnlocked(
+        currentAttempt,
+        checkpointStore.snapshot().options,
+        allowStopped,
+      )
+    );
+  const stopVirtualCamera = async () =>
+    await withMediaOperation(stopVirtualCameraUnlocked);
+  const startCameraOutput = async (allowStopped = false) =>
+    await withMediaOperation(async () =>
+      await startCameraOutputUnlocked(
+        checkpointStore.snapshot().options,
+        allowStopped,
+      )
+    );
+  const reconcileMedia = async (
+    configured: RunCheckpoint["options"],
+    currentAttempt: number,
+  ): Promise<boolean> => await withMediaOperation(async () => {
+    if (configured.record || configured.virtualCamera) {
+      await ensureVirtualDashboardUnlocked();
+    }
+    if (!configured.record) await stopRecordingUnlocked();
+    const recordingNeedsRestart = configured.record
+      ? await startRecordingUnlocked(currentAttempt, configured, false)
+      : false;
+    if (
+      virtualCamera &&
+      (!configured.virtualCamera || virtualCamera.device !== configured.virtualCameraDevice)
+    ) {
+      await stopVirtualCameraUnlocked();
+    }
+    if (configured.virtualCamera) {
+      await startCameraOutputUnlocked(configured, false);
+    }
+    return recordingNeedsRestart;
+  });
 
   const stopHoldingOverlay = async () => {
     const overlay = holdingOverlay;
@@ -550,6 +737,205 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     terminate.unref();
     kill.unref();
   };
+  const stopCodexAfterThreadSaved = () => {
+    if (!codex || codex.exitCode !== null) return;
+    if (checkpointStore.snapshot().threadId) {
+      stopCodex();
+      return;
+    }
+    configurationRestartAwaitingThread = true;
+  };
+  const requestCodexRestart = (message: string) => {
+    configurationRestartRequested = true;
+    exitDescription = message;
+    controller?.publishTranscript({
+      type: "runner.configuration_restart",
+      message: `${message}; restarting Codex on the same conversation thread.`,
+    });
+    stopCodexAfterThreadSaved();
+  };
+  const applyRuntimeConfiguration = async () => {
+    if (runtimeConfigBusy) return;
+    runtimeConfigBusy = true;
+    let request: Awaited<ReturnType<typeof readRuntimeConfigRequest>> = null;
+    let previous: RunCheckpoint["options"] | null = null;
+    let previousProfiles = accountProfiles;
+    let previousAccountPool = accountPool;
+    let accountsReconfigured = false;
+    let mediaReconciled = false;
+    let configurationCommitted = false;
+    try {
+      request = await readRuntimeConfigRequest(runDirectory);
+      if (!request) return;
+      previous = checkpointStore.snapshot().options;
+      const next = { ...previous, ...request.patch };
+
+      if (request.patch.accountPolicies) {
+        const refreshedProfiles = await discoverCodexAccounts();
+        await Promise.all(
+          refreshedProfiles.map((profile) =>
+            inheritCodexConfiguration(profile.home, codexHome),
+          ),
+        );
+        if (refreshedProfiles.length > 0) {
+          if (accountPool) {
+            await accountPool.reconfigure(refreshedProfiles, request.patch.accountPolicies);
+          } else {
+            accountPool = await AccountPool.open(
+              runDirectory,
+              refreshedProfiles,
+              request.patch.accountPolicies,
+            );
+          }
+        } else {
+          accountPool = null;
+        }
+        accountProfiles = refreshedProfiles;
+        accountsReconfigured = true;
+      }
+
+      mediaReconciled = true;
+      const recordingNeedsRestart = await reconcileMedia(next, attempt);
+
+      let nextRetryAt = checkpointStore.snapshot().retryAt;
+      if (
+        request.patch.quotaWaitMs !== undefined &&
+        outcomePhase === "waiting_quota" &&
+        quotaFallbackStartedAtMs !== null
+      ) {
+        quotaResetAtMs = quotaFallbackStartedAtMs + next.quotaWaitMs;
+        nextRetryAt = new Date(quotaResetAtMs).toISOString();
+        retryAt = nextRetryAt;
+        if (accountPool && activeAccountId) {
+          await accountPool.markBlocked(activeAccountId, quotaResetAtMs);
+        }
+        runtimeConfigGeneration += 1;
+      }
+
+      if (accountsReconfigured && state.snapshot().status !== "running" && accountPool) {
+        const choice = accountPool.choose();
+        await accountPool.persist();
+        if (choice.account && outcomePhase === "waiting_quota") {
+          nextRetryAt = new Date().toISOString();
+          retryAt = nextRetryAt;
+          runtimeConfigGeneration += 1;
+        }
+      }
+
+      await checkpointStore.update({
+        options: next,
+        ...(nextRetryAt !== checkpointStore.snapshot().retryAt
+          ? { retryAt: nextRetryAt }
+          : {}),
+      });
+      configurationCommitted = true;
+      state.setModel(next.model ?? "gpt-6-astra");
+
+      let restartCodex = codex !== null && (
+        (request.patch.model !== undefined && request.patch.model !== previous.model) ||
+        (request.patch.reasoningEffort !== undefined &&
+          request.patch.reasoningEffort !== previous.reasoningEffort)
+      );
+      if (recordingNeedsRestart && codex !== null) restartCodex = true;
+      const restartGameRuntime = request.patch.launchMode !== undefined &&
+        request.patch.launchMode !== previous.launchMode;
+
+      if (accountsReconfigured && activeAccountId) {
+        const activeStillEnabled = accountPool?.snapshot().accounts.some(
+          (entry) => entry.id === activeAccountId,
+        ) === true;
+        if (!activeStillEnabled) {
+          accountRotationRequested = true;
+          quotaExhausted = true;
+          exitDescription = "The active Codex account was disabled by the updated policy";
+          stopCodexAfterThreadSaved();
+        } else if (accountPool?.shouldStopForReserve(activeAccountId)) {
+          reservePauseRequested = true;
+          quotaExhausted = true;
+          exitDescription = "The active Codex account reached the updated reserve limit";
+          stopCodexAfterThreadSaved();
+        }
+      }
+
+      if (restartCodex) {
+        requestCodexRestart(
+          recordingNeedsRestart
+            ? "Starting a new recording part"
+            : "Applying updated model configuration",
+        );
+      }
+
+      if (restartGameRuntime) {
+        configurationRestartRequested = true;
+        requestedStop = "restart";
+        exitDescription = "Applying updated game launch mode";
+        controller?.cancelPendingActions();
+        controller?.publishTranscript({
+          type: "runner.game_runtime_restart",
+          message: "Launch mode changed; sealing the snapshot and restarting the private game runtime.",
+        });
+        stopCodexAfterThreadSaved();
+      }
+
+      const appliedFields = Object.keys(request.patch).filter((field) => field !== "offlineMode");
+      const deferredFields: string[] = [];
+      await writeRuntimeConfigAck(runDirectory, {
+        version: 1,
+        id: request.id,
+        appliedAt: new Date().toISOString(),
+        appliedFields,
+        deferredFields,
+        codexRestarted: restartCodex,
+        error: null,
+      });
+      await audit.append("configuration.updated", {
+        requestId: request.id,
+        appliedFields,
+        deferredFields,
+        codexRestarted: restartCodex,
+      });
+      controller?.publishTranscript({
+        type: "runner.configuration_updated",
+        message: restartGameRuntime
+          ? "Configuration saved; the private game runtime is restarting now."
+          : "Configuration saved and applied.",
+        appliedFields,
+        deferredFields,
+      });
+    } catch (error) {
+      if (!configurationCommitted && mediaReconciled && previous) {
+        const rollbackNeedsRestart = await reconcileMedia(previous, attempt)
+          .catch(() => false);
+        if (rollbackNeedsRestart && codex !== null) {
+          requestCodexRestart("Restoring recording after a configuration failure");
+        }
+      }
+      if (!configurationCommitted && accountsReconfigured && previous) {
+        accountProfiles = previousProfiles;
+        accountPool = previousAccountPool;
+        if (accountPool) {
+          await accountPool.reconfigure(
+            previousProfiles,
+            previous.accountPolicies ?? [],
+          ).catch(() => undefined);
+        }
+      }
+      if (request && !configurationCommitted) {
+        await writeRuntimeConfigAck(runDirectory, {
+          version: 1,
+          id: request.id,
+          appliedAt: new Date().toISOString(),
+          appliedFields: [],
+          deferredFields: [],
+          codexRestarted: false,
+          error: error instanceof Error ? error.message : String(error),
+        }).catch(() => undefined);
+      }
+      await audit.append("configuration.warning", String(error));
+    } finally {
+      runtimeConfigBusy = false;
+    }
+  };
   const checkAccountRotation = async () => {
     if (!accountPool || !activeAccountId || accountRotationRequested) return;
     const choice = accountPool.choose();
@@ -595,16 +981,22 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
   };
   const onInterrupt = () => {
     requestedStop = "pause";
+    startupAbortController.abort();
     controller?.cancelPendingActions();
     stopCodex();
   };
   const onTerminate = () => {
     requestedStop = "restart";
+    startupAbortController.abort();
     controller?.cancelPendingActions();
     stopCodex();
   };
   process.once("SIGINT", onInterrupt);
   process.once("SIGTERM", onTerminate);
+  runtimeConfigPoll = setInterval(() => {
+    void applyRuntimeConfiguration();
+  }, 250);
+  runtimeConfigPoll.unref();
 
   try {
     const steamStatus = await runCommand("pgrep", ["-x", "steam"]);
@@ -628,6 +1020,10 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       game: selectedGame,
       gpuPreference: prior.options.gpuPreference,
       offlineMode: prior.options.offlineMode ?? false,
+      ...(prior.options.launchMode
+        ? { launchMode: prior.options.launchMode }
+        : {}),
+      signal: startupAbortController.signal,
     });
     const activeGame = new X11GameAdapter({
       display: virtualGame.display,
@@ -667,11 +1063,19 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         progress: prior.progress,
       });
       state.pause(pausedAtWall, pausedAtMono);
+      if (resumeFrame) {
+        holdingOverlay = await startHoldingOverlay(
+          runtimeDirectory,
+          virtualGame.display,
+          resumeFrame,
+        );
+      }
     }
 
     const activeController = new ArenaController({
       state,
       game: activeGame,
+      liveCaptureWayland: virtualGame.captureWayland,
       ...(resumeFrame ? { initialFrame: resumeFrame } : {}),
       port: prior.options.port,
       webRoot: path.join(rootDirectory, "web"),
@@ -681,9 +1085,31 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       onTranscript: async (record) => {
         await audit.appendRaw("transcript.jsonl", JSON.stringify(record));
       },
+      supervisorProvider: () => {
+        const checkpoint = checkpointStore.snapshot();
+        return {
+          active: true,
+          checkpoint,
+          accountPool: accountPool?.snapshot() ?? null,
+          recording: {
+            enabled: checkpoint.options.record,
+            active: mediaState.recordingActive,
+            parts: checkpoint.recordings.length,
+            lastError: mediaState.recordingError ?? mediaState.lastError ?? null,
+          },
+          virtualCamera: {
+            enabled: checkpoint.options.virtualCamera,
+            active: mediaState.virtualCameraActive,
+            device: mediaState.virtualCameraDevice ??
+              checkpoint.options.virtualCameraDevice ?? null,
+            lastError: mediaState.virtualCameraError ?? mediaState.lastError ?? null,
+          },
+        };
+      },
     });
     controller = activeController;
     const url = await activeController.listen();
+    controllerUrl = url;
     console.log(`Director dashboard: ${url}`);
     await audit.append("controller.ready", { url });
     activeController.publishTranscript({
@@ -715,27 +1141,17 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       await audit.append("monitor.opened", { url, physicalDesktop: true });
     }
 
-    if (prior.options.record || prior.options.virtualCamera) {
-      virtualDashboard = await startVirtualDashboard({
-        rootDirectory,
-        runtimeDirectory,
-        url,
-      });
+    const initialRuntimeOptions = checkpointStore.snapshot().options;
+    if (initialRuntimeOptions.record || initialRuntimeOptions.virtualCamera) {
+      await ensureVirtualDashboard();
     }
 
-    await startCameraOutput();
+    await startCameraOutput(true);
 
     if (isColdResume) {
-      if (resumeFrame) {
-        holdingOverlay = await startHoldingOverlay(
-          runtimeDirectory,
-          virtualGame.display,
-          resumeFrame,
-        );
-      }
       const restoredFrame = await activeGame.capture();
       activeController.publishFrame(restoredFrame);
-      await startRecording(attempt);
+      await startRecording(attempt, true);
       state.resume(attempt);
       await audit.append("runtime.snapshot.restored", {
         attempt,
@@ -835,6 +1251,9 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         quotaResetAtMs = null;
         reservePauseRequested = false;
         accountRotationRequested = false;
+        configurationRestartRequested = false;
+        configurationRestartAwaitingThread = false;
+        quotaFallbackStartedAtMs = null;
         activeAccountId = null;
         exitDescription = "Codex exited before completion";
         let activeCodexHome = codexHome;
@@ -865,15 +1284,23 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         if (!powerPauseRequested && (!accountPool || activeAccountId)) {
           const part = String(attempt).padStart(4, "0");
           const currentThreadId = checkpointStore.snapshot().threadId;
+          const currentOptions = checkpointStore.snapshot().options;
+          if (currentThreadId) {
+            await ensureCodexThreadInBase(
+              currentThreadId,
+              primaryCodexHome,
+              accountProfiles,
+            );
+          }
           const args = codexArguments({
             mcpEntry,
             arenaUrl: url,
             controlToken: activeController.controlToken,
-            reasoningEffort: prior.options.reasoningEffort,
-            model: prior.options.model ?? "gpt-6-astra",
+            reasoningEffort: currentOptions.reasoningEffort,
+            model: currentOptions.model ?? "gpt-6-astra",
             prompt: currentThreadId
               ? RESUME_PROMPT
-              : initialPrompt(prior.options.goal ?? DEFAULT_GOAL, selectedGame.name),
+              : initialPrompt(currentOptions.goal ?? DEFAULT_GOAL, selectedGame.name),
             ...(currentThreadId ? { resumeThreadId: currentThreadId } : {}),
           });
           const codexStartedAtMs = Date.now();
@@ -883,7 +1310,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           );
           codex = spawn(CODEX_COMMAND, args, {
             cwd: workDirectory,
-            env: codexEnvironment(activeCodexHome),
+            env: codexEnvironment(activeCodexHome, primaryCodexHome),
             detached: true,
             stdio: ["ignore", "pipe", "pipe"],
           });
@@ -929,7 +1356,12 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
                 tailers.clear();
                 const tailer = new RolloutTailer(
                   root.thread_id,
-                  defaultSessionsRoot,
+                  [
+                    path.join(activeCodexHome ?? primaryCodexHome, "sessions"),
+                    path.join(primaryCodexHome, "sessions"),
+                    path.join(os.homedir(), ".codex", "sessions"),
+                    ...accountProfiles.map((profile) => path.join(profile.home, "sessions")),
+                  ],
                   codexStartedAtMs,
                 );
                 tailers.add(tailer);
@@ -944,6 +1376,10 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
                 void tailerTask
                   .catch(() => undefined)
                   .finally(() => tailerTasks.delete(tailerTask));
+                if (configurationRestartAwaitingThread) {
+                  configurationRestartAwaitingThread = false;
+                  stopCodex();
+                }
               }
             })();
             eventTasks.add(task);
@@ -971,7 +1407,8 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
             first.type === "exit" &&
             state.snapshot().status === "running" &&
             !reservePauseRequested &&
-            !accountRotationRequested
+            !accountRotationRequested &&
+            !configurationRestartRequested
           ) {
             exitDescription = `Codex exited before completion (code=${first.exit.code}, signal=${first.exit.signal})`;
           } else if (
@@ -1011,14 +1448,18 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         );
 
         if (requestedStop !== null) break;
-        let rotateAccountImmediately = false;
+        let rotateAccountImmediately = configurationRestartRequested;
         if (
           accountPool &&
           activeAccountId &&
           (quotaExhausted || accountRotationRequested)
         ) {
           if (!reservePauseRequested && !accountRotationRequested) {
-            quotaResetAtMs ??= Date.now() + prior.options.quotaWaitMs;
+            if (quotaResetAtMs === null) {
+              quotaFallbackStartedAtMs = Date.now();
+              quotaResetAtMs = quotaFallbackStartedAtMs +
+                checkpointStore.snapshot().options.quotaWaitMs;
+            }
             await accountPool.markBlocked(activeAccountId, quotaResetAtMs);
           }
           const nextAccount = accountPool.choose();
@@ -1030,6 +1471,11 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           if (!nextAccount.account && nextAccount.retryAtMs !== null) {
             quotaResetAtMs = nextAccount.retryAtMs;
           }
+        }
+        if (quotaExhausted && !rotateAccountImmediately && quotaResetAtMs === null) {
+          quotaFallbackStartedAtMs = Date.now();
+          quotaResetAtMs = quotaFallbackStartedAtMs +
+            checkpointStore.snapshot().options.quotaWaitMs;
         }
         outcomePhase = powerPauseRequested
           ? "waiting_power"
@@ -1043,12 +1489,18 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           : rotateAccountImmediately
             ? new Date().toISOString()
           : quotaExhausted
-            ? quotaRetryAt(Date.now(), prior.options.quotaWaitMs, quotaResetAtMs)
+            ? quotaRetryAt(
+                Date.now(),
+                checkpointStore.snapshot().options.quotaWaitMs,
+                quotaResetAtMs,
+              )
             : new Date(Date.now() + retryDelayMs(attempt)).toISOString();
         reason = powerPauseRequested
           ? powerPauseReason
           : rotateAccountImmediately
-            ? "Switching to another eligible Codex account"
+            ? configurationRestartRequested
+              ? "Applying updated model configuration"
+              : "Switching to another eligible Codex account"
             : exitDescription;
         const waitingSnapshot = state.snapshot();
         await checkpointStore.update({
@@ -1070,7 +1522,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           runtimePreserved: true,
           snapshot: waitingSnapshot,
         });
-        if (prior.options.record) {
+        if (checkpointStore.snapshot().recordings.length > 0 || checkpointStore.snapshot().options.record) {
           try {
             productionVideo = await assembleRecordings(runDirectory);
             await audit.append("recording.assembled", productionVideo);
@@ -1088,10 +1540,19 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         });
 
         if (!powerPauseRequested && retryAt) {
-          await waitUntil(
-            Date.parse(retryAt),
-            () => requestedStop !== null || powerPauseRequested,
-          );
+          while (requestedStop === null && !powerPauseRequested) {
+            const generation = runtimeConfigGeneration;
+            const activeRetryAt = checkpointStore.snapshot().retryAt ?? retryAt;
+            await waitUntil(
+              Date.parse(activeRetryAt),
+              () =>
+                requestedStop !== null ||
+                powerPauseRequested ||
+                runtimeConfigGeneration !== generation,
+            );
+            retryAt = checkpointStore.snapshot().retryAt ?? retryAt;
+            if (runtimeConfigGeneration === generation) break;
+          }
         }
         await checkPower();
         if (powerPauseRequested && requestedStop === null) {
@@ -1115,7 +1576,12 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         const resumedFromPower = powerPauseRequested;
         powerPauseRequested = false;
         attempt += 1;
-        await startRecording(attempt);
+        const resumedOptions = checkpointStore.snapshot().options;
+        if (resumedOptions.record || resumedOptions.virtualCamera) {
+          await ensureVirtualDashboard();
+        }
+        await startRecording(attempt, true);
+        await startCameraOutput(true);
         state.resume(attempt);
         retryAt = null;
         reason = null;
@@ -1150,7 +1616,9 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     } else if (requestedStop === "restart") {
       outcomePhase = "waiting_retry";
       retryAt = new Date().toISOString();
-      reason = "Interrupted by shutdown or service restart";
+      reason = exitDescription === "Codex exited before completion"
+        ? "Interrupted by shutdown or service restart"
+        : exitDescription;
     } else if (requestedStop === "game-exit") {
       outcomePhase = "waiting_retry";
       retryAt = new Date(Date.now() + retryDelayMs(attempt)).toISOString();
@@ -1178,6 +1646,16 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       stack: error instanceof Error ? error.stack : null,
     });
   } finally {
+    const cleanupFailures: string[] = [];
+    const cleanup = async (component: string, operation: () => void | Promise<void>) => {
+      try {
+        await operation();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        cleanupFailures.push(`${component}: ${message}`);
+        await audit.append("cleanup.warning", { component, message }).catch(() => undefined);
+      }
+    };
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);
     for (const tailer of tailers) tailer.stop();
@@ -1187,23 +1665,51 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
     if (gameHealthPoll) clearInterval(gameHealthPoll);
     if (powerPoll) clearInterval(powerPoll);
     if (accountPoll) clearInterval(accountPoll);
+    if (runtimeConfigPoll) clearInterval(runtimeConfigPoll);
     if (checkpointWork.current) {
       await checkpointWork.current.catch(() => undefined);
     }
     if (codex?.exitCode === null) codex.kill("SIGINT");
-    await stopRecording();
-    await stopVirtualCamera().catch(() => undefined);
-    await stopHoldingOverlay();
-    await game?.close().catch(() => undefined);
+    await cleanup("recording", stopRecording);
+    await cleanup("virtual camera", stopVirtualCamera);
+    await cleanup("holding overlay", stopHoldingOverlay);
+    if (game) await cleanup("game adapter", () => game!.close());
     await delay(500);
     browser?.kill("SIGTERM");
-    await virtualDashboard?.close().catch(() => undefined);
-    await virtualGame?.close().catch(() => undefined);
-    await controller?.close().catch(() => undefined);
+    if (virtualDashboard) {
+      await cleanup("director dashboard", () => virtualDashboard!.close());
+    }
+    if (virtualGame) {
+      await cleanup("virtual game", async () => {
+        try {
+          await virtualGame!.close();
+        } catch (firstError) {
+          await delay(250);
+          try {
+            await virtualGame!.close();
+          } catch (retryError) {
+            throw new AggregateError(
+              [firstError, retryError],
+              "Virtual game teardown failed twice",
+              { cause: firstError },
+            );
+          }
+        }
+      });
+    }
+    if (controller) await cleanup("controller", () => controller!.close());
     if (prior.options.isolateSaves && isParabox) {
       await saveGuard.checkpointChallenge().catch(async (error: unknown) => {
         await audit.append("checkpoint.save.warning", String(error));
       });
+    }
+    if (cleanupFailures.length > 0) {
+      const cleanupReason = `Cleanup incomplete: ${cleanupFailures.join("; ")}`;
+      reason = reason ? `${reason}; ${cleanupReason}` : cleanupReason;
+      if (outcomePhase === "completed") {
+        outcomePhase = "failed";
+        retryAt = null;
+      }
     }
     const snapshot = state.snapshot();
     const attemptStarted = snapshot.status !== "idle";
@@ -1246,7 +1752,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         pid: null,
         pidStartTicks: null,
       });
-      if (prior.options.record) {
+      if (checkpointStore.snapshot().recordings.length > 0 || checkpointStore.snapshot().options.record) {
         try {
           productionVideo = await assembleRecordings(runDirectory);
           await audit.append("recording.assembled", productionVideo);
@@ -1362,6 +1868,107 @@ function normalizeModel(value: string): string {
     throw new Error("Invalid model name");
   }
   return model;
+}
+
+export async function verifyCodexThreadAvailable(
+  threadId: string,
+  codexHome: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const sessionsRoot = path.join(codexHome, "sessions");
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await findRollout(sessionsRoot, threadId)) return;
+    if (Date.now() >= deadline) break;
+    await delay(100);
+  } while (true);
+  throw new Error(
+    `Codex thread ${threadId} is missing from the shared session store ${sessionsRoot}`,
+  );
+}
+
+export async function ensureCodexThreadInBase(
+  threadId: string,
+  baseCodexHome: string,
+  accountProfiles: Array<{ home: string }>,
+): Promise<void> {
+  const base = await codexThreadCopy(baseCodexHome, threadId);
+  const profileCopies = (await Promise.all(
+    accountProfiles.map(async (profile) => ({
+      profile,
+      copy: path.resolve(profile.home) === path.resolve(baseCodexHome)
+        ? null
+        : await codexThreadCopy(profile.home, threadId),
+    })),
+  ))
+    .filter((entry): entry is typeof entry & { copy: NonNullable<typeof entry.copy> } =>
+      entry.copy !== null
+    )
+    .sort((left, right) => right.copy.mtimeMs - left.copy.mtimeMs);
+  const newestProfile = profileCopies[0];
+  if (base && (!newestProfile || base.mtimeMs >= newestProfile.copy.mtimeMs)) return;
+  if (newestProfile) {
+    const result = await runCommand(CODEX_COMMAND, ["--version"], {
+      env: codexEnvironment(baseCodexHome, newestProfile.profile.home),
+      timeoutMs: 30_000,
+    });
+    if (
+      result.code === 0 &&
+      await codexThreadCopy(baseCodexHome, threadId)
+    ) {
+      return;
+    }
+  }
+  await verifyCodexThreadAvailable(threadId, baseCodexHome);
+}
+
+async function codexThreadCopy(
+  codexHome: string,
+  threadId: string,
+): Promise<{ filename: string; mtimeMs: number } | null> {
+  const filename = await findRollout(path.join(codexHome, "sessions"), threadId);
+  if (!filename) return null;
+  const indexed = await codexThreadIndexed(codexHome, threadId);
+  if (indexed === false) return null;
+  try {
+    return { filename, mtimeMs: (await stat(filename)).mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+async function codexThreadIndexed(
+  codexHome: string,
+  threadId: string,
+): Promise<boolean | null> {
+  const escaped = threadId.replaceAll("'", "''");
+  try {
+    const result = await runCommand(
+      "sqlite3",
+      [
+        path.join(codexHome, "state_5.sqlite"),
+        `SELECT 1 FROM threads WHERE id='${escaped}' LIMIT 1;`,
+      ],
+      { timeoutMs: 5_000 },
+    );
+    return result.code === 0 ? result.stdout.toString("utf8").trim() === "1" : null;
+  } catch {
+    return null;
+  }
+}
+
+async function findRollout(directory: string, threadId: string): Promise<string | null> {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name.includes(threadId) && entry.name.endsWith(".jsonl")) {
+      return path.join(directory, entry.name);
+    }
+    if (entry.isDirectory()) {
+      const nested = await findRollout(path.join(directory, entry.name), threadId);
+      if (nested) return nested;
+    }
+  }
+  return null;
 }
 
 function gameTitlePattern(game: InstalledSteamGame): RegExp {

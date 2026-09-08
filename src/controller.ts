@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type Server, type ServerResponse } from "node:http";
@@ -6,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { ChallengeState } from "./challenge-state.js";
 import type { GameAdapter, GameFrame } from "./types.js";
 import { allowedKeys, type AllowedKey } from "./types.js";
+import { virtualCameraGameRecorderArguments } from "./virtual-camera.js";
 
 const publicRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -20,14 +22,25 @@ interface ControllerOptions {
   port?: number;
   webRoot?: string;
   controlToken?: string;
+  liveCaptureWayland?: {
+    output: string;
+    environment: NodeJS.ProcessEnv;
+  };
   onTranscript?: (record: TranscriptRecord) => void | Promise<void>;
   onGameAction?: (phase: "before" | "after") => void | Promise<void>;
+  supervisorProvider?: () => unknown | Promise<unknown>;
 }
 
 export interface TranscriptRecord {
   sequence: number;
   at: string;
   event: unknown;
+}
+
+interface LiveStreamProducer {
+  gameProcess: ChildProcess;
+  encoderProcess: ChildProcess;
+  stopping: Promise<void> | null;
 }
 
 export class ArenaController {
@@ -39,13 +52,19 @@ export class ArenaController {
   readonly controlToken: string;
   readonly transcript: TranscriptRecord[] = [];
   #server: Server | null = null;
+  #closing = false;
   #clients = new Set<ServerResponse>();
+  #liveSubscribers = new Set<ServerResponse>();
+  #liveProducer: LiveStreamProducer | null = null;
+  #liveProducerStop: Promise<void> | null = null;
   #frame: GameFrame | null = null;
   #transcriptSequence = 0;
   #actionEpoch = 0;
   #onTranscript: ControllerOptions["onTranscript"];
   #onGameAction: ControllerOptions["onGameAction"];
+  #supervisorProvider: ControllerOptions["supervisorProvider"];
   #transcriptWrites: Promise<void> = Promise.resolve();
+  #liveCaptureWayland: ControllerOptions["liveCaptureWayland"];
 
   constructor(options: ControllerOptions) {
     this.state = options.state;
@@ -57,6 +76,8 @@ export class ArenaController {
       options.controlToken ?? randomBytes(24).toString("base64url");
     this.#onTranscript = options.onTranscript;
     this.#onGameAction = options.onGameAction;
+    this.#supervisorProvider = options.supervisorProvider;
+    this.#liveCaptureWayland = options.liveCaptureWayland;
     this.#frame = options.initialFrame ?? null;
     this.state.on("change", (snapshot) => {
       this.broadcast("state", snapshot);
@@ -92,8 +113,17 @@ export class ArenaController {
   }
 
   async close(): Promise<void> {
+    this.#closing = true;
     for (const client of this.#clients) client.end();
     this.#clients.clear();
+    const producer = this.#liveProducer;
+    for (const client of this.#liveSubscribers) {
+      producer?.encoderProcess.stdout?.unpipe(client);
+      client.end();
+    }
+    this.#liveSubscribers.clear();
+    if (producer) await this.#stopLiveProducer(producer);
+    if (this.#liveProducerStop) await this.#liveProducerStop;
     await this.#transcriptWrites;
     if (!this.#server) return;
     const server = this.#server;
@@ -158,6 +188,15 @@ export class ArenaController {
       json(response, 200, this.state.snapshot());
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/supervisor") {
+      if (!this.#supervisorProvider) {
+        throw Object.assign(new Error("Supervisor state is unavailable"), {
+          statusCode: 404,
+        });
+      }
+      json(response, 200, await this.#supervisorProvider());
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/transcript") {
       json(response, 200, this.transcript);
       return;
@@ -174,6 +213,13 @@ export class ArenaController {
         ETag: `"${this.#frame.sha256}"`,
       });
       response.end(this.#frame.data);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/live.mjpeg") {
+      if (!this.#liveCaptureWayland) {
+        throw Object.assign(new Error("Live game capture is unavailable"), { statusCode: 409 });
+      }
+      await this.#startLiveStream(response);
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/events") {
@@ -309,11 +355,182 @@ export class ArenaController {
     json(response, 404, { error: "not found" });
   }
 
+  async #startLiveStream(response: ServerResponse): Promise<void> {
+    const producer = await this.#ensureLiveProducer();
+    if (this.#closing || response.destroyed) {
+      if (this.#liveSubscribers.size === 0) void this.#stopLiveProducer(producer);
+      if (this.#closing) {
+        throw Object.assign(new Error("Controller is closing"), { statusCode: 503 });
+      }
+      return;
+    }
+    this.#liveSubscribers.add(response);
+    response.writeHead(200, {
+      "Content-Type": "multipart/x-mixed-replace; boundary=ffmpeg",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache",
+      Connection: "close",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.flushHeaders();
+    producer.encoderProcess.stdout?.pipe(response, { end: false });
+    response.once("close", () => this.#removeLiveSubscriber(response, producer));
+
+    if (
+      this.#liveProducer !== producer ||
+      producer.gameProcess.exitCode !== null ||
+      producer.encoderProcess.exitCode !== null
+    ) {
+      this.#removeLiveSubscriber(response, producer);
+      if (!response.writableEnded) response.end();
+    }
+  }
+
+  async #ensureLiveProducer(): Promise<LiveStreamProducer> {
+    if (this.#closing) {
+      throw Object.assign(new Error("Controller is closing"), { statusCode: 503 });
+    }
+    if (this.#liveProducer) return this.#liveProducer;
+    if (this.#liveProducerStop) await this.#liveProducerStop;
+    if (this.#closing) {
+      throw Object.assign(new Error("Controller is closing"), { statusCode: 503 });
+    }
+    if (this.#liveProducer) return this.#liveProducer;
+
+    const capture = this.#liveCaptureWayland!;
+    const gameProcess = spawn(
+      "wf-recorder",
+      virtualCameraGameRecorderArguments(capture.output),
+      {
+        env: capture.environment,
+        detached: true,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+    const encoderProcess = spawn("ffmpeg", [
+      "-nostdin", "-hide_banner", "-loglevel", "error",
+      "-fflags", "nobuffer",
+      "-analyzeduration", "0",
+      "-probesize", "32768",
+      "-f", "mpegts",
+      "-i", "pipe:0",
+      "-an", "-sn",
+      "-vf", "fps=30",
+      "-c:v", "mjpeg",
+      "-q:v", "5",
+      "-flush_packets", "1",
+      "-f", "mpjpeg",
+      "pipe:1",
+    ], {
+      detached: true,
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    const producer: LiveStreamProducer = {
+      gameProcess,
+      encoderProcess,
+      stopping: null,
+    };
+    this.#liveProducer = producer;
+    encoderProcess.stdin?.on("error", () => undefined);
+    gameProcess.stdout?.pipe(encoderProcess.stdin!);
+    const failed = () => this.#producerExited(producer);
+    gameProcess.once("error", failed);
+    encoderProcess.once("error", failed);
+    gameProcess.once("exit", failed);
+    encoderProcess.once("exit", failed);
+    return producer;
+  }
+
+  #removeLiveSubscriber(
+    response: ServerResponse,
+    producer: LiveStreamProducer,
+  ): void {
+    if (!this.#liveSubscribers.delete(response)) return;
+    producer.encoderProcess.stdout?.unpipe(response);
+    if (this.#liveSubscribers.size === 0) void this.#stopLiveProducer(producer);
+  }
+
+  #producerExited(producer: LiveStreamProducer): void {
+    if (producer.stopping) return;
+    for (const response of this.#liveSubscribers) {
+      producer.encoderProcess.stdout?.unpipe(response);
+      if (!response.writableEnded) response.end();
+    }
+    this.#liveSubscribers.clear();
+    void this.#stopLiveProducer(producer);
+  }
+
+  #stopLiveProducer(producer: LiveStreamProducer): Promise<void> {
+    if (producer.stopping) return producer.stopping;
+    if (this.#liveProducer === producer) this.#liveProducer = null;
+    gameToEncoderUnpipe(producer);
+    const stopping = Promise.all([
+      stopChildGroup(producer.encoderProcess),
+      stopChildGroup(producer.gameProcess),
+    ]).then(() => undefined);
+    const tracked = stopping.finally(() => {
+      if (this.#liveProducerStop === tracked) this.#liveProducerStop = null;
+    });
+    producer.stopping = tracked;
+    this.#liveProducerStop = tracked;
+    return tracked;
+  }
+
   #authorize(request: import("node:http").IncomingMessage): void {
     if (request.headers.authorization !== `Bearer ${this.controlToken}`) {
       const error = new Error("unauthorized") as Error & { statusCode?: number };
       error.statusCode = 401;
       throw error;
+    }
+  }
+}
+
+function gameToEncoderUnpipe(producer: LiveStreamProducer): void {
+  producer.gameProcess.stdout?.unpipe(producer.encoderProcess.stdin!);
+  producer.encoderProcess.stdin?.end();
+}
+
+async function stopChildGroup(child: ChildProcess): Promise<void> {
+  if (!childRunning(child) || !child.pid) return;
+  const exited = waitForChildExit(child, 2_000);
+  signalChildGroup(child, "SIGTERM");
+  await exited;
+  if (childRunning(child)) {
+    const killed = waitForChildExit(child, 1_000);
+    signalChildGroup(child, "SIGKILL");
+    await killed;
+  }
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+}
+
+function childRunning(child: ChildProcess): boolean {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout;
+    const finish = () => {
+      clearTimeout(timer);
+      child.off("exit", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, timeoutMs);
+    timer.unref();
+    child.once("exit", finish);
+  });
+}
+
+function signalChildGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (!child.pid) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // The process has already exited.
     }
   }
 }

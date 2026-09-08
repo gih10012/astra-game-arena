@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import type { ChildProcess } from "node:child_process";
+import { once } from "node:events";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { AuditLog } from "../src/audit-log.js";
 import { expectCommand } from "../src/command.js";
-import { composeRecordingPair } from "../src/recording-pair.js";
+import {
+  composeRecordingPair,
+  startRecordingPair,
+  type ActiveRecordingPair,
+} from "../src/recording-pair.js";
 
 test("composes native game and transcript streams into CFR 1920x1080 video", async () => {
   const runDirectory = await mkdtemp(path.join(os.tmpdir(), "game-arena-recording-"));
@@ -33,3 +40,78 @@ test("composes native game and transcript streams into CFR 1920x1080 video", asy
   ])).toString("utf8")) as { streams: Array<{ width: number; height: number; r_frame_rate: string }> };
   assert.deepEqual(probe.streams[0], { width: 1920, height: 1080, r_frame_rate: "30/1" });
 });
+
+test("reports a recorder that dies after startup", async () => {
+  const runDirectory = await mkdtemp(path.join(os.tmpdir(), "game-arena-recorder-exit-"));
+  const binDirectory = path.join(runDirectory, "bin");
+  await mkdir(binDirectory);
+  await Promise.all([
+    writeFile(
+      path.join(binDirectory, "wf-recorder"),
+      "#!/bin/sh\nsleep 1.4\nexit 23\n",
+      { mode: 0o755 },
+    ),
+    writeFile(
+      path.join(binDirectory, "ffmpeg"),
+      "#!/bin/sh\nsleep 30\n",
+      { mode: 0o755 },
+    ),
+  ]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDirectory}${path.delimiter}${originalPath ?? ""}`;
+  let pair: ActiveRecordingPair | undefined;
+  try {
+    const unexpected = new Promise<string>((resolve) => {
+      void (async () => {
+        pair = await startRecordingPair({
+          runDirectory,
+          attempt: 1,
+          game: {
+            display: ":98",
+            keypressCommand: "true",
+            compositorScreenshot: {
+              command: "true",
+              arguments: [],
+              environment: process.env,
+            },
+            captureWayland: { output: "HEADLESS-1", environment: process.env },
+            close: async () => undefined,
+          },
+          dashboard: {
+            display: ":99",
+            close: async () => undefined,
+          },
+          audit: new AuditLog(runDirectory),
+          onUnexpectedExit: resolve,
+        });
+      })().catch((error) => resolve(`startup failed: ${String(error)}`));
+    });
+    const message = await Promise.race([
+      unexpected,
+      new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 5_000)),
+    ]);
+    assert.match(message, /game recorder exited unexpectedly \(code=23/);
+  } finally {
+    process.env.PATH = originalPath;
+    if (pair) {
+      pair.stopping = true;
+      await Promise.all([
+        terminateTestProcess(pair.gameProcess),
+        terminateTestProcess(pair.dashboardProcess),
+      ]);
+    }
+  }
+});
+
+async function terminateTestProcess(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null) return;
+  const exited = once(child, "exit");
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }
+  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 1_000))]);
+}

@@ -52,11 +52,16 @@
               </select>
               <small>大型 3D 游戏建议选择独立显卡</small>
             </label>
-            <label class="record-switch">
-              <input id="offline-mode-toggle" name="offlineMode" type="checkbox" />
-              <span class="switch"></span>
-              <span><b>直接离线启动</b><small>完全不启动或登录 Steam；仅适用于无 Steamworks / DRM 依赖的游戏</small></span>
+            <label class="field launch-mode-field">
+              <span>游戏启动方式</span>
+              <select id="launch-mode-select" name="launchMode" required>
+                <option value="steam-online">Steam 在线模式</option>
+                <option value="steam-offline">Steam 离线登录（缓存凭据与许可证）</option>
+                <option value="direct">直接启动（完全不启动 Steam）</option>
+              </select>
+              <small id="launch-mode-detail">离线登录复用本机已缓存的 Steam 凭据；直接启动可能被 DRM 拒绝。</small>
             </label>
+            <input id="offline-mode-toggle" type="checkbox" hidden aria-hidden="true" />
             <label class="field model-field">
               <span>模型</span>
               <select id="model-select" name="model" required></select>
@@ -98,7 +103,7 @@
             <div id="account-pool" class="account-pool"></div>
           </div>
           <div class="form-actions">
-            <p id="form-message"></p>
+            <p><span id="configuration-mode-note"></span><br /><span id="form-message"></span></p>
             <button id="start-button" type="submit" class="primary">从零开始挑战</button>
           </div>
         </form>

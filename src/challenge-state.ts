@@ -14,7 +14,7 @@ import {
 } from "./types.js";
 
 export class ChallengeState extends EventEmitter {
-  readonly model: string;
+  model: string;
   readonly targetLevels: number;
   readonly goal: string;
   readonly game: { appId: string; name: string } | null;
@@ -99,6 +99,12 @@ export class ChallengeState extends EventEmitter {
     this.#progress = parseParaboxSave(text);
     this.emit("change", this.snapshot());
     return this.#progress;
+  }
+
+  setModel(model: string): void {
+    if (model === this.model) return;
+    this.model = model;
+    this.emit("change", this.snapshot());
   }
 
   fail(message: string): void {

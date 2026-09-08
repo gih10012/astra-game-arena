@@ -112,7 +112,7 @@ Defaults:
 
 - model: `gpt-6-astra`
 - launcher: `codex-proxy` (local port 7890 proxy and official auth profile)
-- game launch: Steam-managed by default; optional direct offline launch starts no Steam process
+- game launch: Steam online by default; choose cached Steam offline login or a direct no-Steam launch per challenge
 - reasoning effort: `high`
 - completion: agent-declared success for the configured goal (Parabox referee reports `364/364`)
 - prompt: generated from the configured natural-language goal and isolated computer-use tools
@@ -134,7 +134,8 @@ Useful variants:
 node dist/src/cli.js run --reasoning xhigh
 node dist/src/cli.js run --quota-wait-hours 5
 node dist/src/cli.js run --codex-home ~/.codex-official
-node dist/src/cli.js run --offline
+node dist/src/cli.js run --launch-mode steam-offline
+node dist/src/cli.js run --launch-mode direct
 node dist/src/cli.js run --no-record
 node dist/src/cli.js run --virtual-camera /dev/video10
 node dist/src/cli.js run --browser
@@ -156,11 +157,15 @@ timer excludes quota, power, suspend, and reboot downtime and resumes from its c
 the final summary also reports total wall time, inactive time, attempt count,
 and whether the run was `continuous` or `resumed`.
 
-`--offline` is a true direct-launch mode: Windows executables run through
-Proton and native Linux executables run directly, without starting or logging
-in to Steam. It is suitable only for games that do not require Steamworks or
-Steam DRM; launch failures remain visible in the director transcript and run
-logs. The same option is available as **直接离线启动** in the control page.
+`--launch-mode steam-offline` starts Steam with the locally cached license and
+offline login state, then launches the selected title through Steam. The
+temporary `loginusers.vdf` change is restored byte-for-byte on teardown. This
+is the verified path for Civilization VI. `--launch-mode direct` is a true
+no-Steam launch: Windows executables run through Proton and native Linux
+executables run directly. It is suitable only for games that do not require
+Steamworks or Steam DRM; launch failures remain visible in the director
+transcript and run logs. The control page exposes all three modes in its
+“游戏启动方式” selector; legacy `--offline` remains an alias for `direct`.
 
 Run artifacts are written under `runs/` and ignored by Git. Interrupted recording parts remain independently playable. At every sealed snapshot boundary, the runner atomically refreshes `production/challenge-production-so-far.mkv`; an independent assembler service applies the same operation to a runner that was already active during an upgrade. It cuts each resumed part at the recorded active-time boundary, normalizes that part once, then stream-copies the normalized parts into the cumulative video. `assemble` performs the operation on demand without touching an open part. On completion the output is `production/challenge-complete.mkv`. Non-destructive repaired release copies take precedence over damaged originals. Each completed run ends with a SHA-256 manifest. Keep the raw artifacts next to the published video or release them separately; do not commit game frames or save files to this repository.
 
@@ -185,7 +190,7 @@ sudo modprobe v4l2loopback video_nr=10 card_label="Astra Game Arena" exclusive_c
 
 Then enable **输出虚拟摄像头** in the challenge settings (or pass `--virtual-camera /dev/video10`). OBS, Tencent Meeting, and other V4L2 clients can select **Astra Game Arena**. The output is live-only and independent of the on-disk recording toggle. `npm run doctor` reports whether a writable loopback device is ready.
 
-While that output is active, the monitor's game pane uses the loopback device through the same-origin `/api/live.mjpeg` endpoint at 1280×720 / 30 FPS. It falls back to the last auditable JPEG frame whenever the camera is disabled, paused, or stopped; the browser never receives direct device access or a camera-permission prompt.
+While a challenge process is active, the monitor's game pane receives the private compositor stream through the same-origin `/api/live.mjpeg` endpoint at 1280×720 / 30 FPS. This does not depend on the virtual-camera toggle. It falls back to the last auditable JPEG frame whenever the private runtime is paused or stopped; the browser never receives direct device access or a camera-permission prompt. The hidden director renderer reads the same live checkpoint, account, recording, and virtual-camera status as the public monitor without contacting the public control plane.
 
 Codex receives matching MCP tools named `challenge_time` and `challenge_tokens`, plus `observe_screen`, `press_keys`, `type_text`, `mouse`, and `complete_challenge`. Referee progress is viewer-only and is not returned to the model.
 

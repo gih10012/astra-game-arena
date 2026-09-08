@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,10 +8,17 @@ import { ControlPlane } from "../src/control-plane.js";
 import {
   CheckpointStore,
   checkpointPath,
+  clearActiveRun,
   durableJsonWrite,
+  processStartTicks,
   registerActiveRun,
   type RunCheckpoint,
 } from "../src/run-checkpoint.js";
+import {
+  readRuntimeConfigRequest,
+  writeRuntimeConfigAck,
+  writeRuntimeMediaState,
+} from "../src/runtime-config.js";
 
 test("serves the durable control page with every pre-run setting", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "game-arena-control-"));
@@ -140,10 +148,317 @@ test("reports active configuration, account percentages, and earliest reset", as
   assert.equal(status.accountPool.earliestFiveHourResetAt, new Date(fiveHourReset).toISOString());
   assert.equal("home" in status.currentAccount, false);
 
+  const immutable = await fetch(`${url}/api/configuration`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ goal: "Replace the active goal" }),
+  });
+  assert.equal(immutable.status, 409);
+
+  const updated = await fetch(`${url}/api/configuration`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      launchMode: "steam-offline",
+      reasoningEffort: "xhigh",
+      record: false,
+      quotaWaitMs: 7_200_000,
+    }),
+  }).then((response) => response.json());
+  assert.equal(updated.accepted, true);
+  assert.deepEqual(updated.acknowledgement.deferredFields, []);
+  const persisted = (await CheckpointStore.load(runDirectory)).snapshot();
+  assert.equal(persisted.options.launchMode, "steam-offline");
+  assert.equal(persisted.options.reasoningEffort, "xhigh");
+  assert.equal(persisted.options.record, false);
+
   const firstPause = await fetch(`${url}/api/control/pause`, { method: "POST" })
     .then((response) => response.json());
   assert.equal(firstPause.alreadyPaused, undefined);
   const secondPause = await fetch(`${url}/api/control/pause`, { method: "POST" })
     .then((response) => response.json());
   assert.equal(secondPause.alreadyPaused, true);
+
+  await clearActiveRun(root, runDirectory);
+  await control.refresh();
+  const idleStatus = await fetch(`${url}/api/status`).then((response) => response.json());
+  assert.equal(idleStatus.configuration.source, "saved");
+  assert.equal(idleStatus.configuration.launchMode, "steam-offline");
+  assert.equal(idleStatus.configuration.reasoningEffort, "xhigh");
+  assert.equal(idleStatus.configuration.record, false);
 });
+
+test("routes waiting live runners through request acknowledgements and reports actual media", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "game-arena-live-config-"));
+  const runDirectory = path.join(root, "runs", "live-config-run");
+  const checkpoint = testCheckpoint(root, runDirectory, {
+    phase: "waiting_quota",
+    pid: process.pid,
+    pidStartTicks: processStartTicks(),
+  });
+  await new CheckpointStore(checkpointPath(runDirectory), checkpoint).update({});
+  await writeRuntimeMediaState(runDirectory, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    recordingActive: true,
+    recordingError: "prior recorder warning",
+    virtualCameraActive: true,
+    virtualCameraDevice: "/dev/video10",
+    virtualCameraError: "prior camera warning",
+  });
+  await registerActiveRun(root, runDirectory);
+
+  const control = new ControlPlane(root, { port: 0 });
+  const url = await control.listen();
+  context.after(() => control.close());
+
+  const status = await fetch(`${url}/api/status`).then((response) => response.json());
+  assert.equal(status.recording.active, true);
+  assert.equal(status.recording.lastError, "prior recorder warning");
+  assert.equal(status.virtualCamera.active, true);
+  assert.equal(status.virtualCamera.lastError, "prior camera warning");
+  const supervisor = await fetch(`${url}/api/supervisor`).then((response) => response.json());
+  assert.equal(supervisor.recording.active, true);
+  assert.equal(supervisor.virtualCamera.active, true);
+
+  await writeRuntimeMediaState(runDirectory, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    recordingActive: false,
+    recordingError: null,
+    virtualCameraActive: false,
+    virtualCameraDevice: null,
+    virtualCameraError: "camera exited",
+  });
+
+  const pendingResponse = fetch(`${url}/api/configuration`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ record: false }),
+  });
+  const request = await waitForRuntimeRequest(runDirectory);
+  assert.deepEqual(request.patch, { record: false });
+  await (await CheckpointStore.load(runDirectory)).update((current) => ({
+    options: { ...current.options, record: false },
+  }));
+  await writeRuntimeConfigAck(runDirectory, {
+    version: 1,
+    id: request.id,
+    appliedAt: new Date().toISOString(),
+    appliedFields: ["record"],
+    deferredFields: [],
+    codexRestarted: false,
+    error: null,
+  });
+  const appliedResponse = await pendingResponse;
+  const applied = await appliedResponse.json();
+  assert.equal(appliedResponse.status, 200);
+  assert.equal(applied.accepted, true);
+  assert.equal(applied.pending, false);
+  assert.equal(applied.acknowledgement.id, request.id);
+
+  const rejectedResponsePromise = fetch(`${url}/api/configuration`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ virtualCamera: false }),
+  });
+  const rejectedRequest = await waitForRuntimeRequest(runDirectory);
+  await writeRuntimeConfigAck(runDirectory, {
+    version: 1,
+    id: rejectedRequest.id,
+    appliedAt: new Date().toISOString(),
+    appliedFields: [],
+    deferredFields: [],
+    codexRestarted: false,
+    error: "virtual camera stop failed",
+  });
+  const rejectedResponse = await rejectedResponsePromise;
+  const rejected = await rejectedResponse.json();
+  assert.equal(rejectedResponse.status, 409);
+  assert.equal(rejected.accepted, false);
+  assert.equal(rejected.pending, false);
+  assert.equal(rejected.acknowledgement.error, "virtual camera stop failed");
+
+  const timedOutResponse = await fetch(`${url}/api/configuration`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reasoningEffort: "medium" }),
+  });
+  const timedOut = await timedOutResponse.json();
+  assert.equal(timedOutResponse.status, 202);
+  assert.equal(timedOut.accepted, true);
+  assert.equal(timedOut.pending, true);
+  assert.equal(timedOut.acknowledgement, null);
+  assert.equal(timedOut.configuration.reasoningEffort, "high");
+
+  await (await CheckpointStore.load(runDirectory)).update({
+    pid: null,
+    pidStartTicks: null,
+  });
+  await control.refresh();
+  const stoppedMedia = await fetch(`${url}/api/status`).then((response) => response.json());
+  assert.equal(stoppedMedia.recording.active, false);
+  assert.equal(stoppedMedia.virtualCamera.active, false);
+
+  await clearActiveRun(root, runDirectory);
+  await control.refresh();
+  const saved = await fetch(`${url}/api/status`).then((response) => response.json());
+  assert.equal(saved.configuration.record, false);
+  assert.equal(saved.configuration.virtualCamera, true);
+});
+
+test("proxies the live runner stream without requiring a virtual camera", async (context) => {
+  let liveRequests = 0;
+  const runner = createServer((request, response) => {
+    if (request.url === "/api/live.mjpeg") {
+      liveRequests += 1;
+      response.writeHead(200, {
+        "Content-Type": "multipart/x-mixed-replace; boundary=runner",
+      });
+      response.end("--runner\r\nContent-Type: image/jpeg\r\n\r\nFRAME\r\n--runner--\r\n");
+      return;
+    }
+    response.writeHead(204);
+    response.end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    runner.once("error", reject);
+    runner.listen(0, "127.0.0.1", resolve);
+  });
+  context.after(() => new Promise<void>((resolve) => runner.close(() => resolve())));
+  const runnerAddress = runner.address();
+  assert.ok(runnerAddress && typeof runnerAddress === "object");
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "game-arena-live-preview-"));
+  const runDirectory = path.join(root, "runs", "live-preview-run");
+  const checkpoint = testCheckpoint(root, runDirectory, {
+    phase: "running",
+    pid: process.pid,
+    pidStartTicks: processStartTicks(),
+  });
+  checkpoint.options.port = runnerAddress.port;
+  checkpoint.options.virtualCamera = false;
+  await new CheckpointStore(checkpointPath(runDirectory), checkpoint).update({});
+  await writeRuntimeMediaState(runDirectory, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    recordingActive: false,
+    recordingError: null,
+    virtualCameraActive: false,
+    virtualCameraDevice: null,
+    virtualCameraError: null,
+  });
+  await registerActiveRun(root, runDirectory);
+
+  const control = new ControlPlane(root, { port: 0 });
+  const url = await control.listen();
+  context.after(() => control.close());
+
+  const preview = await fetch(`${url}/api/live.mjpeg`);
+  assert.equal(preview.status, 200);
+  assert.equal(
+    preview.headers.get("content-type"),
+    "multipart/x-mixed-replace; boundary=runner",
+  );
+  assert.match(await preview.text(), /FRAME/);
+  assert.equal(liveRequests, 1);
+
+  await (await CheckpointStore.load(runDirectory)).update({
+    pid: null,
+    pidStartTicks: null,
+  });
+  await control.refresh();
+  const unavailable = await fetch(`${url}/api/live.mjpeg`);
+  assert.equal(unavailable.status, 409);
+});
+
+test("serializes concurrent checkpoint configuration updates", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "game-arena-concurrent-config-"));
+  const runDirectory = path.join(root, "runs", "concurrent-config-run");
+  const checkpoint = testCheckpoint(root, runDirectory);
+  await new CheckpointStore(checkpointPath(runDirectory), checkpoint).update({});
+  await registerActiveRun(root, runDirectory);
+
+  const control = new ControlPlane(root, { port: 0 });
+  const url = await control.listen();
+  context.after(() => control.close());
+  const responses = await Promise.all([
+    fetch(`${url}/api/configuration`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ record: false }),
+    }),
+    fetch(`${url}/api/configuration`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reasoningEffort: "xhigh" }),
+    }),
+  ]);
+  assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+  const persisted = (await CheckpointStore.load(runDirectory)).snapshot();
+  assert.equal(persisted.options.record, false);
+  assert.equal(persisted.options.reasoningEffort, "xhigh");
+});
+
+function testCheckpoint(
+  root: string,
+  runDirectory: string,
+  overrides: Partial<RunCheckpoint> = {},
+): RunCheckpoint {
+  const now = new Date().toISOString();
+  return {
+    version: 1,
+    runId: path.basename(runDirectory),
+    runDirectory,
+    createdAt: now,
+    updatedAt: now,
+    phase: "waiting_retry",
+    attempt: 1,
+    pid: null,
+    pidStartTicks: null,
+    threadId: null,
+    retryAt: now,
+    reason: "test",
+    savePrepared: true,
+    elapsedMs: 100,
+    startedAt: now,
+    tokens: {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 0,
+    },
+    progress: { total: 0, unlocked: 0, completed: 0 },
+    recordings: [],
+    options: {
+      rootDirectory: root,
+      publicPort: 4317,
+      port: 4318,
+      model: "gpt-6-astra",
+      goal: "Complete the test challenge",
+      gpuPreference: "auto",
+      launchMode: "steam-offline",
+      offlineMode: false,
+      reasoningEffort: "high",
+      record: true,
+      virtualCamera: true,
+      virtualCameraDevice: "/dev/video10",
+      openDashboard: false,
+      isolateSaves: true,
+      quotaWaitMs: 18_000_000,
+      accountPolicies: [],
+    },
+    ...overrides,
+  };
+}
+
+async function waitForRuntimeRequest(runDirectory: string) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const request = await readRuntimeConfigRequest(runDirectory);
+    if (request) return request;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for runtime configuration request");
+}

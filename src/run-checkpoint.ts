@@ -25,6 +25,7 @@ export interface PersistedRunOptions {
   goal?: string;
   game?: InstalledSteamGame;
   gpuPreference: "auto" | "integrated" | "discrete";
+  launchMode?: "steam-online" | "steam-offline" | "direct";
   offlineMode?: boolean;
   reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   record: boolean;

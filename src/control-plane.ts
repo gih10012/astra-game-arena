@@ -1,9 +1,18 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import {
+  createServer,
+  get as httpGet,
+  type ClientRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  AccountPool,
   discoverCodexAccounts,
   type AccountPoolState,
   type AccountUsageState,
@@ -13,6 +22,7 @@ import { runCommand } from "./command.js";
 import {
   CheckpointStore,
   clearActiveRun,
+  durableJsonWrite,
   isTerminal,
   processMatches,
   readActiveRun,
@@ -20,6 +30,14 @@ import {
   type AccountPolicy,
   type RunCheckpoint,
 } from "./run-checkpoint.js";
+import {
+  readRuntimeConfigAck,
+  readRuntimeMediaState,
+  writeRuntimeConfigRequest,
+  type MutableRuntimeConfiguration,
+  type RuntimeConfigAck,
+  type RuntimeMediaState,
+} from "./runtime-config.js";
 import { cancelChallenge, queueChallenge } from "./runner.js";
 import { restoreFromRecovery } from "./save-guard.js";
 import { discoverInstalledSteamGames } from "./steam-catalog.js";
@@ -32,6 +50,23 @@ const webRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   import.meta.url.includes("/dist/") ? "../../web" : "../web",
 );
+const OPERATOR_CONFIG_FILENAME = "operator-config.json";
+
+interface OperatorConfiguration {
+  version: 1;
+  updatedAt: string;
+  gameAppId: string;
+  goal: string;
+  gpuPreference: "auto" | "integrated" | "discrete";
+  launchMode: "steam-online" | "steam-offline" | "direct";
+  model: string;
+  reasoningEffort: "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  record: boolean;
+  virtualCamera: boolean;
+  virtualCameraDevice: string;
+  quotaWaitMs: number;
+  accountPolicies: AccountPolicy[];
+}
 
 interface TranscriptRecord {
   sequence: number;
@@ -60,10 +95,14 @@ export class ControlPlane {
   #frame: { data: Buffer; type: string; etag: string } | null = null;
   #clients = new Set<ServerResponse>();
   #livePreviews = new Map<ServerResponse, ChildProcess>();
+  #liveProxies = new Map<ServerResponse, ClientRequest>();
   #lastStateJson = "";
   #lastTranscriptKey = "";
   #lastFrameEtag = "";
   #options: Awaited<ReturnType<typeof loadOptions>> | null = null;
+  #configurationUpdates: Promise<void> = Promise.resolve();
+  #pendingConfigurationIds = new Map<string, string>();
+  #lastOperatorConfigurationKey = "";
 
   constructor(rootDirectory: string, options: { host?: string; port?: number } = {}) {
     this.rootDirectory = path.resolve(rootDirectory);
@@ -108,6 +147,11 @@ export class ControlPlane {
       client.end();
     }
     this.#livePreviews.clear();
+    for (const [client, upstream] of this.#liveProxies) {
+      upstream.destroy();
+      client.end();
+    }
+    this.#liveProxies.clear();
     if (!this.#server) return;
     const server = this.#server;
     this.#server = null;
@@ -129,6 +173,8 @@ export class ControlPlane {
       }
       const checkpoint = (await CheckpointStore.load(runDirectory)).snapshot();
       this.#checkpoint = checkpoint;
+      await this.#syncOperatorConfiguration(checkpoint);
+      await this.#broadcastPendingConfigurationAcks(runDirectory);
       const internalPort = checkpoint.options.port;
       const canProxy = internalPort !== this.port &&
         checkpoint.pid !== null &&
@@ -168,44 +214,53 @@ export class ControlPlane {
     }
     if (request.method === "GET" && url.pathname === "/api/options") {
       this.#options = await loadOptions();
+      const operator = await readOperatorConfiguration(this.rootDirectory);
+      const configured = this.#checkpoint?.options;
+      const defaults = configurationDefaults(
+        configured,
+        operator,
+        this.#options.virtualCameras[0]?.device ?? "/dev/video10",
+      );
       json(response, 200, {
         ...this.#options,
         reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
-        defaults: {
-          gameAppId: "1260520",
-          goal: "Complete all official levels in Patrick's Parabox.",
-          gpuPreference: "auto",
-          offlineMode: false,
-          model: "gpt-6-astra",
-          reasoningEffort: "high",
-          record: true,
-          virtualCamera: false,
-          virtualCameraDevice: this.#options.virtualCameras[0]?.device ?? "/dev/video10",
-        },
+        defaults,
       });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/status") {
-      const accountPool = await accountPoolSnapshot(this.#checkpoint);
-      const virtualCameras = await discoverVirtualCameraDevices();
+      const checkpoint = this.#checkpoint;
+      const [accountPool, virtualCameras, operatorConfiguration, mediaState] = await Promise.all([
+        accountPoolSnapshot(checkpoint),
+        discoverVirtualCameraDevices(),
+        readOperatorConfiguration(this.rootDirectory),
+        checkpoint ? readRuntimeMediaState(checkpoint.runDirectory) : null,
+      ]);
       json(response, 200, statusSnapshot({
         rootDirectory: this.rootDirectory,
         host: this.host,
         port: this.port,
-        checkpoint: this.#checkpoint,
+        checkpoint,
         challenge: this.#snapshot,
         accountPool,
         virtualCameras,
+        operatorConfiguration,
+        mediaState,
       }));
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/supervisor") {
+      const checkpoint = this.#checkpoint;
+      const [accountPool, mediaState] = await Promise.all([
+        accountPoolSnapshot(checkpoint),
+        checkpoint ? readRuntimeMediaState(checkpoint.runDirectory) : null,
+      ]);
       json(response, 200, {
-        active: this.#checkpoint !== null,
-        checkpoint: this.#checkpoint,
-        accountPool: await accountPoolSnapshot(this.#checkpoint),
-        recording: recordingStatus(this.#checkpoint),
-        virtualCamera: virtualCameraStatus(this.#checkpoint),
+        active: checkpoint !== null,
+        checkpoint,
+        accountPool,
+        recording: recordingStatus(checkpoint, mediaState),
+        virtualCamera: virtualCameraStatus(checkpoint, mediaState),
       });
       return;
     }
@@ -240,7 +295,19 @@ export class ControlPlane {
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/live.mjpeg") {
-      const camera = virtualCameraStatus(this.#checkpoint);
+      const checkpoint = this.#checkpoint;
+      if (hasLiveRunner(checkpoint)) {
+        const address = this.#server?.address();
+        if (typeof address === "object" && address?.port === checkpoint.options.port) {
+          throw new HttpError(502, "The private runner stream points to the control-plane port");
+        }
+        this.#startRunnerLivePreview(response, checkpoint.options.port);
+        return;
+      }
+      const mediaState = checkpoint
+        ? await readRuntimeMediaState(checkpoint.runDirectory)
+        : null;
+      const camera = virtualCameraStatus(checkpoint, mediaState);
       if (!camera.active || !camera.device) {
         throw new HttpError(409, "Live preview is available while the virtual camera is active");
       }
@@ -275,6 +342,7 @@ export class ControlPlane {
       }
       const reasoningEffort = parseReasoning(body.reasoningEffort);
       const gpuPreference = parseGpuPreference(body.gpuPreference);
+      const launchMode = parseLaunchMode(body.launchMode, body.offlineMode);
       const accountPolicies = parseAccountPolicies(body.accountPolicies, options.accounts);
       const virtualCamera = body.virtualCamera === true;
       const virtualCameraDevice = String(
@@ -314,7 +382,8 @@ export class ControlPlane {
         model,
         goal,
         gpuPreference,
-        offlineMode: body.offlineMode === true,
+        launchMode,
+        offlineMode: launchMode === "direct",
         reasoningEffort,
         record: body.record !== false,
         virtualCamera,
@@ -322,8 +391,148 @@ export class ControlPlane {
         openDashboard: false,
         accountPolicies,
       });
+      await writeOperatorConfiguration(this.rootDirectory, {
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        gameAppId,
+        goal,
+        gpuPreference,
+        launchMode,
+        model,
+        reasoningEffort,
+        record: body.record !== false,
+        virtualCamera,
+        virtualCameraDevice,
+        quotaWaitMs: 5 * 60 * 60_000,
+        accountPolicies,
+      });
       await this.refresh();
       json(response, 202, outcome);
+      return;
+    }
+    if (request.method === "PATCH" && url.pathname === "/api/configuration") {
+      const body = await readJson(request);
+      const result = await this.#serializeConfigurationUpdate(async () => {
+        const checkpoint = await requiredCheckpoint(this.rootDirectory);
+        if (isTerminal(checkpoint.phase)) {
+          throw new HttpError(409, "The active challenge has already ended");
+        }
+        const options = await loadOptions();
+        const patch = parseMutableConfiguration(body, checkpoint, options);
+        let acknowledgement: RuntimeConfigAck;
+
+        if (hasLiveRunner(checkpoint)) {
+          const requestId = randomUUID();
+          await writeRuntimeConfigRequest(checkpoint.runDirectory, {
+            version: 1,
+            id: requestId,
+            requestedAt: new Date().toISOString(),
+            patch,
+          });
+          const runnerAck = await waitForRuntimeConfigAck(
+            checkpoint.runDirectory,
+            requestId,
+            2_500,
+          );
+          if (!runnerAck) {
+            this.#pendingConfigurationIds.set(requestId, checkpoint.runDirectory);
+            await this.refresh();
+            const pending = { id: requestId, pending: true };
+            this.#broadcast("configuration", pending);
+            return {
+              status: 202,
+              body: {
+                accepted: true,
+                pending: true,
+                requestId,
+                configuration: configurationStatus(
+                  this.#checkpoint,
+                  this.rootDirectory,
+                  this.port,
+                  options.virtualCameras[0]?.device ?? "/dev/video10",
+                ),
+                acknowledgement: null,
+              },
+            };
+          }
+          acknowledgement = runnerAck;
+          if (acknowledgement.error) {
+            await this.refresh();
+            this.#broadcast("configuration", acknowledgement);
+            return {
+              status: 409,
+              body: {
+                error: acknowledgement.error,
+                accepted: false,
+                pending: false,
+                configuration: configurationStatus(
+                  this.#checkpoint,
+                  this.rootDirectory,
+                  this.port,
+                  options.virtualCameras[0]?.device ?? "/dev/video10",
+                ),
+                acknowledgement,
+              },
+            };
+          }
+        } else {
+          const store = await CheckpointStore.load(checkpoint.runDirectory);
+          await store.update((current) => ({
+            options: { ...current.options, ...patch },
+          }));
+          // A watchdog may start a waiting run between this read and write.
+          // Leave the same idempotent patch in the runner queue so a process
+          // that captured the previous checkpoint cannot overwrite it later.
+          if (checkpoint.phase !== "paused") {
+            await writeRuntimeConfigRequest(checkpoint.runDirectory, {
+              version: 1,
+              id: randomUUID(),
+              requestedAt: new Date().toISOString(),
+              patch,
+            });
+          }
+          if (patch.accountPolicies) {
+            const profiles = await discoverCodexAccounts();
+            await AccountPool.open(
+              checkpoint.runDirectory,
+              profiles,
+              patch.accountPolicies,
+            );
+          }
+          acknowledgement = {
+            version: 1,
+            id: randomUUID(),
+            appliedAt: new Date().toISOString(),
+            appliedFields: Object.keys(patch),
+            deferredFields: [],
+            codexRestarted: false,
+            error: null,
+          };
+        }
+
+        const appliedCheckpoint = (await CheckpointStore.load(checkpoint.runDirectory)).snapshot();
+        await writeOperatorConfiguration(
+          this.rootDirectory,
+          operatorConfigurationFromCheckpoint(appliedCheckpoint),
+        );
+        await this.refresh();
+        this.#broadcast("configuration", acknowledgement);
+        return {
+          status: acknowledgement.appliedFields.length > 0 ? 200 : 202,
+          body: {
+            accepted: true,
+            pending: false,
+            configuration: configurationStatus(
+              this.#checkpoint,
+              this.rootDirectory,
+              this.port,
+              options.virtualCameras[0]?.device ?? "/dev/video10",
+            ),
+            acknowledgement,
+          },
+        };
+      });
+      json(response, result.status, result.body);
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/control/pause") {
@@ -384,6 +593,30 @@ export class ControlPlane {
     throw new HttpError(404, "not found");
   }
 
+  async #serializeConfigurationUpdate<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#configurationUpdates.then(operation, operation);
+    this.#configurationUpdates = result.then(() => undefined, () => undefined);
+    return await result;
+  }
+
+  async #syncOperatorConfiguration(checkpoint: RunCheckpoint): Promise<void> {
+    const configured = operatorConfigurationFromCheckpoint(checkpoint);
+    const key = JSON.stringify({ ...configured, updatedAt: null });
+    if (key === this.#lastOperatorConfigurationKey) return;
+    await writeOperatorConfiguration(this.rootDirectory, configured);
+    this.#lastOperatorConfigurationKey = key;
+  }
+
+  async #broadcastPendingConfigurationAcks(runDirectory: string): Promise<void> {
+    for (const [requestId, pendingRunDirectory] of this.#pendingConfigurationIds) {
+      if (pendingRunDirectory !== runDirectory) continue;
+      const acknowledgement = await readRuntimeConfigAck(runDirectory, requestId);
+      if (!acknowledgement) continue;
+      this.#pendingConfigurationIds.delete(requestId);
+      this.#broadcast("configuration", acknowledgement);
+    }
+  }
+
   #startLivePreview(
     response: ServerResponse,
     device: string,
@@ -401,6 +634,7 @@ export class ControlPlane {
       Connection: "close",
       "X-Content-Type-Options": "nosniff",
     });
+    response.flushHeaders();
     process.stdout?.pipe(response);
 
     let stderr = "";
@@ -432,6 +666,51 @@ export class ControlPlane {
         });
       }
       finish();
+    });
+  }
+
+  #startRunnerLivePreview(response: ServerResponse, port: number): void {
+    const upstream = httpGet(
+      `http://127.0.0.1:${port}/api/live.mjpeg`,
+      (source) => {
+        if ((source.statusCode ?? 500) >= 400) {
+          source.resume();
+          this.#liveProxies.delete(response);
+          if (!response.headersSent) {
+            json(response, source.statusCode ?? 502, {
+              error: "The private game live stream is unavailable",
+            });
+          }
+          return;
+        }
+        response.writeHead(200, {
+          "Content-Type": source.headers["content-type"] ??
+            "multipart/x-mixed-replace; boundary=ffmpeg",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          Pragma: "no-cache",
+          Connection: "close",
+          "X-Content-Type-Options": "nosniff",
+        });
+        response.flushHeaders();
+        source.pipe(response);
+        source.once("end", () => this.#liveProxies.delete(response));
+      },
+    );
+    this.#liveProxies.set(response, upstream);
+    const finish = () => {
+      const active = this.#liveProxies.get(response);
+      if (active !== upstream) return;
+      this.#liveProxies.delete(response);
+      upstream.destroy();
+    };
+    response.once("close", finish);
+    upstream.once("error", (error) => {
+      finish();
+      if (!response.headersSent) {
+        json(response, 502, { error: `Live preview failed: ${error.message}` });
+      } else if (!response.writableEnded) {
+        response.end();
+      }
     });
   }
 
@@ -601,6 +880,8 @@ function statusSnapshot(options: {
   challenge: unknown;
   accountPool: AccountPoolState | null;
   virtualCameras: Awaited<ReturnType<typeof discoverVirtualCameraDevices>>;
+  operatorConfiguration: OperatorConfiguration | null;
+  mediaState: RuntimeMediaState | null;
 }) {
   const checkpoint = options.checkpoint;
   const accounts = options.accountPool?.accounts.map(publicAccountStatus) ?? [];
@@ -642,6 +923,7 @@ function statusSnapshot(options: {
       options.rootDirectory,
       options.port,
       options.virtualCameras[0]?.device ?? "/dev/video10",
+      options.operatorConfiguration,
     ),
     currentAccount,
     accountPool: {
@@ -651,12 +933,9 @@ function statusSnapshot(options: {
       earliestFiveHourResetAt,
     },
     earliestResetAt,
-    recording: recordingStatus(checkpoint),
+    recording: recordingStatus(checkpoint, options.mediaState),
     virtualCamera: {
-      enabled: checkpoint?.options.virtualCamera ?? false,
-      active:
-        checkpoint?.options.virtualCamera === true && checkpoint.phase === "running",
-      device: checkpoint?.options.virtualCameraDevice ?? null,
+      ...virtualCameraStatus(checkpoint, options.mediaState),
       available: options.virtualCameras.some((device) => device.writable),
       devices: options.virtualCameras,
     },
@@ -668,30 +947,106 @@ function configurationStatus(
   rootDirectory: string,
   publicPort: number,
   defaultVirtualCameraDevice: string,
+  operator: OperatorConfiguration | null = null,
 ) {
   const configured = checkpoint?.options;
+  const launchMode = configured?.launchMode ??
+    (configured?.offlineMode === true ? "direct" : operator?.launchMode ?? "steam-online");
   return {
-    source: configured ? "active-run" : "defaults",
+    source: configured ? "active-run" : operator ? "saved" : "defaults",
     rootDirectory: configured?.rootDirectory ?? rootDirectory,
     publicPort: configured?.publicPort ?? publicPort,
     internalPort: configured?.port ?? 4318,
     game: configured?.game ?? null,
-    gameAppId: configured?.game?.appId ?? "1260520",
-    gpuPreference: configured?.gpuPreference ?? "auto",
-    offlineMode: configured?.offlineMode ?? false,
+    gameAppId: configured?.game?.appId ?? operator?.gameAppId ?? "1260520",
+    gpuPreference: configured?.gpuPreference ?? operator?.gpuPreference ?? "auto",
+    launchMode,
+    offlineMode: launchMode === "direct",
     goal:
-      configured?.goal ?? "Complete all official levels in Patrick's Parabox.",
-    model: configured?.model ?? "gpt-6-astra",
-    reasoningEffort: configured?.reasoningEffort ?? "high",
-    record: configured?.record ?? true,
-    virtualCamera: configured?.virtualCamera ?? false,
+      configured?.goal ?? operator?.goal ?? "Complete all official levels in Patrick's Parabox.",
+    model: configured?.model ?? operator?.model ?? "gpt-6-astra",
+    reasoningEffort: configured?.reasoningEffort ?? operator?.reasoningEffort ?? "high",
+    record: configured?.record ?? operator?.record ?? true,
+    virtualCamera: configured?.virtualCamera ?? operator?.virtualCamera ?? false,
     virtualCameraDevice:
-      configured?.virtualCameraDevice ?? defaultVirtualCameraDevice,
+      configured?.virtualCameraDevice ?? operator?.virtualCameraDevice ?? defaultVirtualCameraDevice,
     openDashboard: configured?.openDashboard ?? false,
     isolateSaves: configured?.isolateSaves ?? true,
     codexHome: configured?.codexHome ?? null,
-    quotaWaitMs: configured?.quotaWaitMs ?? 5 * 60 * 60_000,
-    accountPolicies: configured?.accountPolicies ?? [],
+    quotaWaitMs: configured?.quotaWaitMs ?? operator?.quotaWaitMs ?? 5 * 60 * 60_000,
+    accountPolicies: configured?.accountPolicies ?? operator?.accountPolicies ?? [],
+  };
+}
+
+function operatorConfigPath(rootDirectory: string): string {
+  return path.join(rootDirectory, ".arena", OPERATOR_CONFIG_FILENAME);
+}
+
+async function readOperatorConfiguration(
+  rootDirectory: string,
+): Promise<OperatorConfiguration | null> {
+  try {
+    const value = JSON.parse(
+      await readFile(operatorConfigPath(rootDirectory), "utf8"),
+    ) as OperatorConfiguration;
+    return value.version === 1 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeOperatorConfiguration(
+  rootDirectory: string,
+  value: OperatorConfiguration,
+): Promise<void> {
+  await durableJsonWrite(operatorConfigPath(rootDirectory), value);
+}
+
+function configurationDefaults(
+  configured: RunCheckpoint["options"] | undefined,
+  operator: OperatorConfiguration | null,
+  virtualCameraDevice: string,
+): Omit<OperatorConfiguration, "version" | "updatedAt"> & { offlineMode: boolean } {
+  const launchMode = configured?.launchMode ??
+    (configured?.offlineMode === true ? "direct" : operator?.launchMode ?? "steam-online");
+  return {
+    gameAppId: configured?.game?.appId ?? operator?.gameAppId ?? "1260520",
+    goal: configured?.goal ?? operator?.goal ??
+      "Complete all official levels in Patrick's Parabox.",
+    gpuPreference: configured?.gpuPreference ?? operator?.gpuPreference ?? "auto",
+    launchMode,
+    offlineMode: launchMode === "direct",
+    model: configured?.model ?? operator?.model ?? "gpt-6-astra",
+    reasoningEffort: configured?.reasoningEffort ?? operator?.reasoningEffort ?? "high",
+    record: configured?.record ?? operator?.record ?? true,
+    virtualCamera: configured?.virtualCamera ?? operator?.virtualCamera ?? false,
+    virtualCameraDevice: configured?.virtualCameraDevice ??
+      operator?.virtualCameraDevice ?? virtualCameraDevice,
+    quotaWaitMs: configured?.quotaWaitMs ?? operator?.quotaWaitMs ?? 5 * 60 * 60_000,
+    accountPolicies: configured?.accountPolicies ?? operator?.accountPolicies ?? [],
+  };
+}
+
+function operatorConfigurationFromCheckpoint(
+  checkpoint: RunCheckpoint,
+): OperatorConfiguration {
+  const configured = checkpoint.options;
+  const launchMode = configured.launchMode ??
+    (configured.offlineMode === true ? "direct" : "steam-online");
+  return {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    gameAppId: configured.game?.appId ?? "1260520",
+    goal: configured.goal ?? "Complete all official levels in Patrick's Parabox.",
+    gpuPreference: configured.gpuPreference,
+    launchMode,
+    model: configured.model ?? "gpt-6-astra",
+    reasoningEffort: configured.reasoningEffort,
+    record: configured.record,
+    virtualCamera: configured.virtualCamera,
+    virtualCameraDevice: configured.virtualCameraDevice,
+    quotaWaitMs: configured.quotaWaitMs,
+    accountPolicies: configured.accountPolicies ?? [],
   };
 }
 
@@ -738,24 +1093,44 @@ function earliestIso(values: string[]): string | null {
   );
 }
 
-function recordingStatus(checkpoint: RunCheckpoint | null) {
-  if (!checkpoint) return { enabled: false, active: false, parts: 0 };
+function recordingStatus(
+  checkpoint: RunCheckpoint | null,
+  mediaState: RuntimeMediaState | null,
+) {
+  if (!checkpoint) {
+    return { enabled: false, active: false, parts: 0, lastError: null };
+  }
   return {
     enabled: checkpoint.options.record,
-    active: checkpoint.options.record && checkpoint.phase === "running",
+    active: hasLiveRunner(checkpoint) && mediaState?.recordingActive === true,
     parts: checkpoint.recordings.length,
     production: path.join(checkpoint.runDirectory, "production", "challenge-production-so-far.mkv"),
+    lastError: mediaState?.recordingError ?? mediaState?.lastError ?? null,
   };
 }
 
-function virtualCameraStatus(checkpoint: RunCheckpoint | null) {
-  if (!checkpoint) return { enabled: false, active: false, device: null };
+function virtualCameraStatus(
+  checkpoint: RunCheckpoint | null,
+  mediaState: RuntimeMediaState | null,
+) {
+  if (!checkpoint) {
+    return { enabled: false, active: false, device: null, lastError: null };
+  }
+  const active = hasLiveRunner(checkpoint) && mediaState?.virtualCameraActive === true;
   return {
     enabled: checkpoint.options.virtualCamera,
-    active:
-      checkpoint.options.virtualCamera && checkpoint.phase === "running",
-    device: checkpoint.options.virtualCameraDevice,
+    active,
+    device: active
+      ? mediaState?.virtualCameraDevice ?? null
+      : checkpoint.options.virtualCameraDevice,
+    lastError: mediaState?.virtualCameraError ?? mediaState?.lastError ?? null,
   };
+}
+
+function hasLiveRunner(checkpoint: RunCheckpoint | null): checkpoint is RunCheckpoint & { pid: number } {
+  return checkpoint?.pid !== null &&
+    checkpoint?.pid !== undefined &&
+    processMatches(checkpoint.pid, checkpoint.pidStartTicks);
 }
 
 async function lastRuntimeFrame(checkpoint: RunCheckpoint) {
@@ -829,6 +1204,108 @@ async function fetchBuffer(url: string) {
   } catch {
     return null;
   }
+}
+
+function parseMutableConfiguration(
+  body: Record<string, unknown>,
+  checkpoint: RunCheckpoint,
+  options: Awaited<ReturnType<typeof loadOptions>>,
+): Partial<MutableRuntimeConfiguration> {
+  const immutable = ["game", "gameAppId", "goal", "gpuPreference"];
+  for (const field of immutable) {
+    if (field in body) {
+      throw new HttpError(409, `${field} cannot be changed during a challenge`);
+    }
+  }
+  const allowed = new Set([
+    "model",
+    "reasoningEffort",
+    "launchMode",
+    "record",
+    "virtualCamera",
+    "virtualCameraDevice",
+    "quotaWaitMs",
+    "accountPolicies",
+  ]);
+  const unknown = Object.keys(body).filter((field) => !allowed.has(field));
+  if (unknown.length > 0) {
+    throw new HttpError(400, `Unknown configuration field: ${unknown.join(", ")}`);
+  }
+  if (Object.keys(body).length === 0) {
+    throw new HttpError(400, "At least one mutable configuration field is required");
+  }
+
+  const patch: Partial<MutableRuntimeConfiguration> = {};
+  if ("model" in body) {
+    const model = String(body.model ?? "");
+    if (!options.models.some((entry) => entry.slug === model)) {
+      throw new HttpError(400, "Selected model is unavailable");
+    }
+    patch.model = model;
+  }
+  if ("reasoningEffort" in body) patch.reasoningEffort = parseReasoning(body.reasoningEffort);
+  if ("launchMode" in body) {
+    patch.launchMode = parseLaunchMode(body.launchMode);
+    patch.offlineMode = patch.launchMode === "direct";
+  }
+  if ("record" in body) patch.record = strictBoolean(body.record, "record");
+  if ("virtualCamera" in body) {
+    patch.virtualCamera = strictBoolean(body.virtualCamera, "virtualCamera");
+  }
+  if ("virtualCameraDevice" in body) {
+    patch.virtualCameraDevice = String(body.virtualCameraDevice ?? "");
+  }
+  const resultingVirtualCamera = patch.virtualCamera ?? checkpoint.options.virtualCamera;
+  const resultingDevice = patch.virtualCameraDevice ?? checkpoint.options.virtualCameraDevice;
+  if (
+    resultingVirtualCamera &&
+    !options.virtualCameras.some((entry) => entry.device === resultingDevice && entry.writable)
+  ) {
+    throw new HttpError(400, `Virtual camera ${resultingDevice} is unavailable or not writable`);
+  }
+  if ("quotaWaitMs" in body) {
+    const quotaWaitMs = Number(body.quotaWaitMs);
+    if (!Number.isSafeInteger(quotaWaitMs) || quotaWaitMs < 60_000 || quotaWaitMs > 7 * 24 * 60 * 60_000) {
+      throw new HttpError(400, "quotaWaitMs must be an integer between 60000 and 604800000");
+    }
+    patch.quotaWaitMs = quotaWaitMs;
+  }
+  if ("accountPolicies" in body) {
+    patch.accountPolicies = parseAccountPolicies(body.accountPolicies, options.accounts);
+  }
+  return patch;
+}
+
+function strictBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") throw new HttpError(400, `${field} must be boolean`);
+  return value;
+}
+
+function parseLaunchMode(
+  value: unknown,
+  legacyOfflineMode: unknown = undefined,
+): "steam-online" | "steam-offline" | "direct" {
+  const mode = value === undefined
+    ? legacyOfflineMode === true ? "direct" : "steam-online"
+    : String(value);
+  if (!(["steam-online", "steam-offline", "direct"] as string[]).includes(mode)) {
+    throw new HttpError(400, "Invalid launch mode");
+  }
+  return mode as "steam-online" | "steam-offline" | "direct";
+}
+
+async function waitForRuntimeConfigAck(
+  runDirectory: string,
+  requestId: string,
+  timeoutMs: number,
+): Promise<RuntimeConfigAck | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ack = await readRuntimeConfigAck(runDirectory, requestId);
+    if (ack) return ack;
+    await delay(50);
+  }
+  return null;
 }
 
 function parseReasoning(value: unknown): "low" | "medium" | "high" | "xhigh" | "max" | "ultra" {

@@ -2,11 +2,12 @@ import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { AuditLog } from "./audit-log.js";
 import { ChallengeState } from "./challenge-state.js";
-import { runCommand } from "./command.js";
+import { expectCommand, runCommand } from "./command.js";
 import { ArenaController } from "./controller.js";
 import { defaultGamePaths } from "./doctor.js";
 import { X11GameAdapter } from "./game-adapter.js";
 import {
+  DIRECTOR_GAME_RECT,
   startVirtualDashboard,
   startVirtualGame,
   type VirtualDashboardRuntime,
@@ -17,6 +18,11 @@ import {
   stopAndComposeRecordingPair,
   type ActiveRecordingPair,
 } from "./recording-pair.js";
+import {
+  discoverVirtualCameraDevices,
+  startVirtualCamera,
+  type ActiveVirtualCamera,
+} from "./virtual-camera.js";
 import { SaveGuard } from "./save-guard.js";
 import { TARGET_LEVELS } from "./types.js";
 import { findInstalledSteamGame } from "./steam-catalog.js";
@@ -28,6 +34,7 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
   before: { filename: string; sha256: string };
   after: { filename: string; sha256: string };
   recording: { filename: string; bytes: number; durationSeconds: number };
+  virtualCamera: { device: string; sample: string; bytes: number } | null;
 }> {
   const output = path.join(
     rootDirectory,
@@ -47,6 +54,7 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
   let controller: ArenaController | null = null;
   let dashboard: VirtualDashboardRuntime | null = null;
   let recorder: ActiveRecordingPair | null = null;
+  let virtualCamera: ActiveVirtualCamera | null = null;
   try {
     runtime = await startVirtualGame({
       rootDirectory,
@@ -60,7 +68,8 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
       compositorScreenshot: runtime.compositorScreenshot,
     });
     const discovered = await waitForGame(game, 120_000);
-    const visible = await game.waitForVisibleFrame(120_000);
+    await game.waitForVisibleFrame(120_000);
+    const visible = await waitForSubstantiveFrame(game, 120_000);
     const before = visible.frame;
     const state = new ChallengeState("gpt-6-astra", TARGET_LEVELS);
     controller = new ArenaController({
@@ -68,6 +77,29 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
       game,
       port: 0,
       webRoot: path.join(rootDirectory, "web"),
+      supervisorProvider: () => ({
+        active: true,
+        checkpoint: {
+          runId: "headless-smoke",
+          phase: state.snapshot().status,
+          pid: process.pid,
+          retryAt: null,
+          reason: null,
+        },
+        accountPool: null,
+        recording: {
+          enabled: true,
+          active: recorder !== null,
+          parts: 0,
+          lastError: null,
+        },
+        virtualCamera: {
+          enabled: virtualCamera !== null,
+          active: virtualCamera !== null,
+          device: virtualCamera?.device ?? null,
+          lastError: null,
+        },
+      }),
     });
     const url = await controller.listen();
     state.start("headless-smoke");
@@ -107,6 +139,17 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
       runtimeDirectory,
       url,
     });
+    const loopback = (await discoverVirtualCameraDevices()).find(
+      (device) => device.writable,
+    );
+    if (loopback) {
+      virtualCamera = await startVirtualCamera({
+        device: loopback.device,
+        game: runtime,
+        dashboard,
+        audit,
+      });
+    }
     recorder = await startRecordingPair({
       runDirectory: output,
       attempt: 1,
@@ -114,7 +157,6 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
       dashboard,
       audit,
     });
-    await game.clickPointer(512, 930, "left", 1);
     await delay(1_800);
     const after = await game.capture();
     const afterFilename = game.latestFrameFilename();
@@ -124,6 +166,9 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
     await game.press(["UP"], { intervalMs: 80, settleMs: 100 });
     await game.movePointer(640, 540);
     await delay(2_500);
+    const virtualCameraSample = virtualCamera
+      ? await captureVirtualCameraSample(output, virtualCamera.device)
+      : null;
     const recordingRelative = await stopAndComposeRecordingPair(output, recorder);
     recorder = null;
     const recordingPath = path.join(output, recordingRelative);
@@ -145,17 +190,39 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
         bytes: recordingSize,
         durationSeconds,
       },
+      virtualCamera: virtualCameraSample,
     };
   } finally {
     if (recorder) {
       await stopAndComposeRecordingPair(output, recorder).catch(() => undefined);
     }
+    await virtualCamera?.close().catch(() => undefined);
     await dashboard?.close().catch(() => undefined);
     await controller?.close().catch(() => undefined);
     await game?.close().catch(() => undefined);
     await runtime?.close().catch(() => undefined);
     await saveGuard.restore();
   }
+}
+
+async function captureVirtualCameraSample(
+  outputDirectory: string,
+  device: string,
+): Promise<{ device: string; sample: string; bytes: number }> {
+  const sample = path.join(outputDirectory, "virtual-camera-sample.jpg");
+  await expectCommand("ffmpeg", [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-f", "v4l2",
+    "-video_size", "1920x1080",
+    "-framerate", "30",
+    "-i", device,
+    "-frames:v", "1",
+    sample,
+  ], { timeoutMs: 20_000 });
+  const bytes = (await stat(sample)).size;
+  if (bytes < 1_024) throw new Error("Virtual camera sample is empty");
+  await requireVisibleGameRegion(sample, "Virtual camera sample");
+  return { device, sample, bytes };
 }
 
 async function validateRecording(filename: string): Promise<number> {
@@ -177,7 +244,7 @@ async function validateRecording(filename: string): Promise<number> {
   }
   const frames = await runCommand("ffmpeg", [
     "-nostdin", "-v", "error", "-i", filename,
-    "-vf", "crop=1280:1080:0:0,fps=1",
+    "-vf", `${gameRegionCrop()},fps=1`,
     "-f", "framemd5", "-",
   ], { timeoutMs: 30_000 });
   const hashes = new Set(
@@ -189,7 +256,40 @@ async function validateRecording(filename: string): Promise<number> {
   if (frames.code !== 0 || hashes.size < 2) {
     throw new Error("Smoke recording does not contain a continuously changing native game pane");
   }
+  await requireVisibleGameRegion(filename, "Smoke recording");
   return duration;
+}
+
+async function requireVisibleGameRegion(filename: string, label: string): Promise<void> {
+  const result = await runCommand("ffmpeg", [
+    "-nostdin", "-v", "error", "-i", filename,
+    "-vf", `${gameRegionCrop()},fps=1,signalstats,metadata=print:file=-`,
+    "-f", "null", "-",
+  ], { timeoutMs: 30_000 });
+  const averages = [...result.stdout.toString("utf8").matchAll(/signalstats\.YAVG=([\d.]+)/g)]
+    .map((match) => Number(match[1]));
+  if (result.code !== 0 || !averages.some((value) => value >= 18)) {
+    throw new Error(`${label} contains no visible native game frame`);
+  }
+}
+
+function gameRegionCrop(): string {
+  const region = DIRECTOR_GAME_RECT;
+  return `crop=${region.width}:${region.height}:${region.x}:${region.y}`;
+}
+
+async function waitForSubstantiveFrame(
+  game: X11GameAdapter,
+  timeoutMs: number,
+): Promise<{ frame: Awaited<ReturnType<X11GameAdapter["capture"]>>; filename: string }> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const frame = await game.capture();
+    const filename = game.latestFrameFilename();
+    if ((await stat(filename)).size >= 50_000) return { frame, filename };
+    await delay(500);
+  }
+  throw new Error("Patrick's Parabox did not reach its title screen before the timeout");
 }
 
 async function waitForGame(
