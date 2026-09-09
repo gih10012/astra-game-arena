@@ -132,7 +132,7 @@ test("pins a custom provider when the API-key fallback is active", () => {
   assert.ok(args.includes('model_provider="crs"'));
 });
 
-test("recognizes the persisted unsupported-model result before a cold resume", async () => {
+test("recognizes a persisted unsupported-model diagnostic", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "codex-fallback-history-"));
   try {
     await writeFile(

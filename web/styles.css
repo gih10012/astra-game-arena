@@ -135,7 +135,7 @@ main { display: grid; grid-template-columns: minmax(0, 2fr) minmax(370px, 1fr); 
 .event.tool .event-title { color: var(--amber); }.event.agent .event-title { color: var(--ink); }.event.reasoning .event-title { color: #9eb1ba; font-style: italic; }.event.error .event-title, .error-text pre { color: var(--danger); }.event.success .event-title { color: var(--teal); }
 .event-detail { margin-top: 6px; border-left: 1px solid #34434a; padding-left: 8px; }.event-detail > span { display: block; margin-bottom: 2px; color: #65767e; font-size: 8px; }.event-detail pre { max-height: 210px; margin: 0; overflow: hidden; color: #aebbc0; font: inherit; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
 
-.runtime-strip { display: grid; grid-template-columns: 1.2fr .75fr .75fr 1.2fr .55fr 1fr; border: 1px solid var(--line); background: #0b1316; }
+.runtime-strip { display: grid; grid-template-columns: 1.05fr .65fr .65fr 1.05fr .5fr .85fr .95fr; border: 1px solid var(--line); background: #0b1316; }
 .runtime-strip div { min-width: 0; padding: 6px 11px; border-right: 1px solid var(--line); }.runtime-strip div:last-child { border: 0; }.runtime-strip span { display: block; color: var(--muted); font-size: 7px; }.runtime-strip b { display: block; overflow: hidden; margin-top: 2px; color: #b9c8cb; font-size: 9px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 footer { display: flex; justify-content: space-between; color: #596970; font-size: 7px; }
 

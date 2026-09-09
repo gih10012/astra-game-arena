@@ -12,9 +12,8 @@ import {
   type RunCheckpoint,
 } from "./run-checkpoint.js";
 
-const ASSEMBLY_VERSION = 4;
+const ASSEMBLY_VERSION = 5;
 const FRAMES_PER_SECOND = 30;
-const LEGACY_RECORDER_PROBE_MS = 1_000;
 
 export interface AuditEvent {
   at: string;
@@ -128,7 +127,7 @@ export async function assembleRecordings(
   );
   const assemblySignature = {
     version: ASSEMBLY_VERSION,
-    method: "snapshot-boundary-cut",
+    method: "untrimmed-sealed-part-concat",
     output,
     complete: checkpoint.phase === "completed",
     sources,
@@ -226,7 +225,7 @@ export async function assembleRecordings(
     };
     await durableJsonWrite(metadataPath, {
       version: ASSEMBLY_VERSION,
-      method: "snapshot-boundary-cut",
+      method: "untrimmed-sealed-part-concat",
       assembledAt: new Date().toISOString(),
       runId: checkpoint.runId,
       phase: checkpoint.phase,
@@ -347,67 +346,12 @@ export function recordingCuts(
   events: AuditEvent[],
   recordingNames: string[],
 ): RecordingCut[] {
-  const recordings = new Map<number, { eventAtMs: number; captureAtMs: number }>();
-  const activeStarts = new Map<number, { activeAtMs: number; elapsedMs: number }>();
-  const activeEnds = new Map<number, number>();
-  for (const event of events) {
-    const data = objectValue(event.data);
-    const attempt = numberValue(data?.attempt);
-    if (attempt === null) continue;
-    if (event.type === "recording.started") {
-      const eventAtMs = Date.parse(event.at);
-      const explicitCaptureAtMs = Date.parse(stringValue(data?.captureStartedAt) ?? "");
-      if (Number.isFinite(eventAtMs)) {
-        recordings.set(attempt, {
-          eventAtMs,
-          captureAtMs: Number.isFinite(explicitCaptureAtMs)
-            ? explicitCaptureAtMs
-            : eventAtMs - LEGACY_RECORDER_PROBE_MS,
-        });
-      }
-    }
-    if (event.type === "challenge.started" || event.type === "challenge.resumed") {
-      const eventAtMs = Date.parse(event.at);
-      const explicitActiveAtMs = Date.parse(stringValue(data?.activeStartedAt) ?? "");
-      const elapsedMs = numberValue(data?.activeStartedElapsedMs) ?? nestedElapsedMs(data);
-      if (Number.isFinite(eventAtMs) && elapsedMs !== null) {
-        activeStarts.set(attempt, {
-          activeAtMs: Number.isFinite(explicitActiveAtMs)
-            ? explicitActiveAtMs
-            : eventAtMs,
-          elapsedMs,
-        });
-      }
-    }
-    if (event.type === "attempt.finished") {
-      const elapsedMs = numberValue(data?.activeEndedElapsedMs) ?? nestedElapsedMs(data);
-      if (elapsedMs !== null) activeEnds.set(attempt, elapsedMs);
-    }
-  }
-
-  const sortedStarts = [...activeStarts.entries()].sort(([left], [right]) => left - right);
-  return recordingNames.map((name) => {
-    const attempt = recordingAttempt(name);
-    const recording = recordings.get(attempt);
-    const activeStart = activeStarts.get(attempt);
-    let endElapsedMs = activeEnds.get(attempt) ?? null;
-    if (endElapsedMs === null && activeStart) {
-      endElapsedMs =
-        sortedStarts.find(([candidate]) => candidate > attempt)?.[1].elapsedMs ?? null;
-    }
-    const trimStartSeconds =
-      attempt === 1 || !recording || !activeStart
-        ? 0
-        : frameCeiling(
-            Math.max(0, activeStart.activeAtMs - recording.captureAtMs) / 1_000,
-          );
-    const activeStartElapsedMs = attempt === 1 ? 0 : activeStart?.elapsedMs;
-    const activeDurationSeconds =
-      activeStartElapsedMs !== undefined && endElapsedMs !== null
-        ? frameRounding(Math.max(0, endElapsedMs - activeStartElapsedMs) / 1_000)
-        : null;
-    return { attempt, trimStartSeconds, activeDurationSeconds };
-  });
+  void events;
+  return recordingNames.map((name) => ({
+    attempt: recordingAttempt(name),
+    trimStartSeconds: 0,
+    activeDurationSeconds: null,
+  }));
 }
 
 function exactActiveElapsedMs(events: AuditEvent[], cuts: RecordingCut[]): number | null {
@@ -478,13 +422,7 @@ async function normalizeRecording(
     "warning",
     "-y",
   ];
-  if (cut.trimStartSeconds > 0) {
-    args.push("-ss", cut.trimStartSeconds.toFixed(3));
-  }
   args.push("-i", source);
-  if (cut.activeDurationSeconds !== null) {
-    args.push("-t", cut.activeDurationSeconds.toFixed(3));
-  }
   args.push(
     "-map",
     "0:v:0",
@@ -646,14 +584,6 @@ function numberValue(value: unknown): number | null {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
-}
-
-function frameCeiling(seconds: number): number {
-  return Math.ceil(seconds * FRAMES_PER_SECOND) / FRAMES_PER_SECOND;
-}
-
-function frameRounding(seconds: number): number {
-  return Math.round(seconds * FRAMES_PER_SECOND) / FRAMES_PER_SECOND;
 }
 
 async function releaseRecordingPath(

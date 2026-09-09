@@ -44,6 +44,7 @@ test("serves the durable control page with every pre-run setting", async (contex
     "record-toggle",
     "virtual-camera-toggle",
     "virtual-camera-select",
+    "virtual-microphone-state",
     "model-select",
     "reasoning-select",
     "account-pool",
@@ -68,6 +69,14 @@ test("serves the durable control page with every pre-run setting", async (contex
   assert.equal(status.currentAccount, null);
   assert.equal(status.earliestResetAt, null);
   assert.equal(status.virtualCamera.enabled, false);
+  assert.equal(status.virtualMicrophone.enabled, false);
+  assert.deepEqual(status.continuity, {
+    mode: "retained-live-process",
+    runtimeRetained: false,
+    runtimeFrozen: false,
+    coldRelaunchAllowed: false,
+    daemonRestartSafe: true,
+  });
 });
 
 test("reports active configuration, account percentages, and earliest reset", async (context) => {
@@ -163,11 +172,17 @@ test("reports active configuration, account percentages, and earliest reset", as
   }).then((response) => response.json());
   assert.equal(goalUpdate.accepted, true);
 
+  const immutableLaunch = await fetch(`${url}/api/configuration`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ launchMode: "steam-offline" }),
+  });
+  assert.equal(immutableLaunch.status, 409);
+
   const updated = await fetch(`${url}/api/configuration`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      launchMode: "steam-offline",
       reasoningEffort: "xhigh",
       record: false,
       quotaWaitMs: 7_200_000,
@@ -179,7 +194,7 @@ test("reports active configuration, account percentages, and earliest reset", as
   assert.equal(updated.accepted, true);
   assert.deepEqual(updated.acknowledgement.deferredFields, []);
   const persisted = (await CheckpointStore.load(runDirectory)).snapshot();
-  assert.equal(persisted.options.launchMode, "steam-offline");
+  assert.equal(persisted.options.launchMode, undefined);
   assert.equal(persisted.options.reasoningEffort, "xhigh");
   assert.equal(persisted.options.record, false);
   assert.equal(persisted.options.goal, "Replace the active goal");
@@ -198,7 +213,7 @@ test("reports active configuration, account percentages, and earliest reset", as
   await control.refresh();
   const idleStatus = await fetch(`${url}/api/status`).then((response) => response.json());
   assert.equal(idleStatus.configuration.source, "saved");
-  assert.equal(idleStatus.configuration.launchMode, "steam-offline");
+  assert.equal(idleStatus.configuration.launchMode, "direct");
   assert.equal(idleStatus.configuration.reasoningEffort, "xhigh");
   assert.equal(idleStatus.configuration.record, false);
   assert.equal(idleStatus.configuration.goal, "Replace the active goal");
@@ -277,6 +292,8 @@ test("routes waiting live runners through request acknowledgements and reports a
     phase: "waiting_quota",
     pid: process.pid,
     pidStartTicks: processStartTicks(),
+    gameRuntimeReady: true,
+    gameRuntimeFrozen: true,
   });
   await new CheckpointStore(checkpointPath(runDirectory), checkpoint).update({});
   await writeRuntimeMediaState(runDirectory, {
@@ -287,6 +304,9 @@ test("routes waiting live runners through request acknowledgements and reports a
     virtualCameraActive: true,
     virtualCameraDevice: "/dev/video10",
     virtualCameraError: "prior camera warning",
+    virtualMicrophoneActive: true,
+    virtualMicrophoneName: "astra_game_microphone_test",
+    virtualMicrophoneError: null,
   });
   await registerActiveRun(root, runDirectory);
 
@@ -299,9 +319,14 @@ test("routes waiting live runners through request acknowledgements and reports a
   assert.equal(status.recording.lastError, "prior recorder warning");
   assert.equal(status.virtualCamera.active, true);
   assert.equal(status.virtualCamera.lastError, "prior camera warning");
+  assert.equal(status.virtualMicrophone.active, true);
+  assert.equal(status.virtualMicrophone.name, "astra_game_microphone_test");
+  assert.equal(status.continuity.runtimeRetained, true);
+  assert.equal(status.continuity.runtimeFrozen, true);
   const supervisor = await fetch(`${url}/api/supervisor`).then((response) => response.json());
   assert.equal(supervisor.recording.active, true);
   assert.equal(supervisor.virtualCamera.active, true);
+  assert.equal(supervisor.virtualMicrophone.active, true);
 
   await writeRuntimeMediaState(runDirectory, {
     version: 1,
@@ -311,6 +336,9 @@ test("routes waiting live runners through request acknowledgements and reports a
     virtualCameraActive: false,
     virtualCameraDevice: null,
     virtualCameraError: "camera exited",
+    virtualMicrophoneActive: false,
+    virtualMicrophoneName: "astra_game_microphone_test",
+    virtualMicrophoneError: "microphone exited",
   });
 
   const pendingResponse = fetch(`${url}/api/configuration`, {
@@ -381,6 +409,7 @@ test("routes waiting live runners through request acknowledgements and reports a
   const stoppedMedia = await fetch(`${url}/api/status`).then((response) => response.json());
   assert.equal(stoppedMedia.recording.active, false);
   assert.equal(stoppedMedia.virtualCamera.active, false);
+  assert.equal(stoppedMedia.virtualMicrophone.active, false);
 
   await clearActiveRun(root, runDirectory);
   await control.refresh();
@@ -417,6 +446,7 @@ test("proxies the live runner stream without requiring a virtual camera", async 
     phase: "running",
     pid: process.pid,
     pidStartTicks: processStartTicks(),
+    gameRuntimeReady: true,
   });
   checkpoint.options.port = runnerAddress.port;
   checkpoint.options.virtualCamera = false;

@@ -104,6 +104,7 @@ export async function runDoctor(options: { codexHome?: string } = {}): Promise<D
     commandCheck("wlr-randr"),
     commandCheck("grim"),
     commandCheck("wf-recorder"),
+    commandCheck("pactl"),
     commandCheck("v4l2-ctl", false),
     commandCheck("google-chrome-stable"),
     commandCheck("steam"),
@@ -130,6 +131,17 @@ export async function runDoctor(options: { codexHome?: string } = {}): Promise<D
         ).join(", ")
       : "not configured; install/load v4l2loopback to enable OBS/meeting output",
     required: false,
+  });
+
+  const pipeWirePulse = await runCommand("pactl", ["info"], { timeoutMs: 5_000 });
+  const pulseDetail = pipeWirePulse.stdout.toString("utf8");
+  checks.push({
+    name: "virtual game microphone",
+    ok: pipeWirePulse.code === 0 && /Server Name:\s*PulseAudio \(on PipeWire/i.test(pulseDetail),
+    detail: pipeWirePulse.code === 0
+      ? (/Server Name:\s*([^\n]+)/i.exec(pulseDetail)?.[1] ?? "PulseAudio-compatible server ready")
+      : "PipeWire Pulse compatibility server is unavailable",
+    required: true,
   });
 
   const loginResult = await runCommand(CODEX_COMMAND, ["login", "status"], {

@@ -67,6 +67,7 @@ test("reloads only agent configuration without interrupting a healthy runtime", 
   const healthy = {
     hotRestartRequested: true,
     stopRequested: false,
+    operatorPauseRequested: false,
     powerPauseRequested: false,
     recordingFailureRequested: false,
     quotaExhausted: false,
@@ -76,6 +77,7 @@ test("reloads only agent configuration without interrupting a healthy runtime", 
   assert.equal(canReloadCodexContinuously(healthy), true);
   for (const field of [
     "stopRequested",
+    "operatorPauseRequested",
     "powerPauseRequested",
     "recordingFailureRequested",
     "quotaExhausted",

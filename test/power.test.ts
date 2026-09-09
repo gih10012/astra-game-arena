@@ -6,21 +6,21 @@ import test from "node:test";
 import {
   powerAllowsResume,
   readPowerState,
-  shouldSnapshotForLowBattery,
+  shouldPauseForLowBattery,
 } from "../src/power.js";
 
-test("snapshots at three percent only while discharging without power", () => {
-  assert.equal(shouldSnapshotForLowBattery({
+test("pauses at three percent only while discharging without power", () => {
+  assert.equal(shouldPauseForLowBattery({
     batteryPercent: 3,
     discharging: true,
     externalPower: false,
   }), true);
-  assert.equal(shouldSnapshotForLowBattery({
+  assert.equal(shouldPauseForLowBattery({
     batteryPercent: 3,
     discharging: false,
     externalPower: true,
   }), false);
-  assert.equal(shouldSnapshotForLowBattery({
+  assert.equal(shouldPauseForLowBattery({
     batteryPercent: 4,
     discharging: true,
     externalPower: false,

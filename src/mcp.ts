@@ -130,7 +130,7 @@ for (const tool of [
   {
     name: "challenge_time",
     title: "Challenge time",
-    description: "Return active challenge time; paused, quota, sleep, and reboot gaps are excluded.",
+    description: "Return active challenge time; paused, quota, and system-sleep gaps are excluded.",
     path: "/api/challenge/time",
   },
   {

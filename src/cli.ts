@@ -8,6 +8,7 @@ import { runHeadlessSmoke } from "./headless-smoke.js";
 import { runModelSmoke } from "./model-smoke.js";
 import { CheckpointStore, readActiveRun } from "./run-checkpoint.js";
 import { restoreFromRecovery } from "./save-guard.js";
+import { cleanupPrivateGameAudio } from "./private-audio.js";
 import {
   assembleRecordings,
   runAssemblyWatcher,
@@ -210,6 +211,10 @@ if (command === "doctor") {
   if (!recovery) throw new Error("Usage: game-arena restore <save-recovery.json>");
   await restoreFromRecovery(path.resolve(recovery));
   console.log("Save files restored.");
+} else if (command === "cleanup-audio") {
+  const runId = args[0];
+  if (!runId) throw new Error("Usage: game-arena cleanup-audio <run-id>");
+  await cleanupPrivateGameAudio(runId);
 } else {
   console.log(`Astra Game Arena
 

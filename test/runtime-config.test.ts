@@ -6,9 +6,11 @@ import test from "node:test";
 import {
   readRuntimeConfigAck,
   readRuntimeConfigRequest,
+  readRuntimeControlState,
   readRuntimeMediaState,
   writeRuntimeConfigAck,
   writeRuntimeConfigRequest,
+  writeRuntimeControlState,
   writeRuntimeMediaState,
 } from "../src/runtime-config.js";
 
@@ -57,4 +59,15 @@ test("persists actual runtime media state", async () => {
   };
   await writeRuntimeMediaState(runDirectory, state);
   assert.deepEqual(await readRuntimeMediaState(runDirectory), state);
+});
+
+test("persists operator pause intent across control-plane and runner races", async () => {
+  const runDirectory = await mkdtemp(path.join(os.tmpdir(), "game-arena-control-state-"));
+  assert.equal(await readRuntimeControlState(runDirectory), null);
+
+  await writeRuntimeControlState(runDirectory, true);
+  assert.equal((await readRuntimeControlState(runDirectory))?.operatorPaused, true);
+
+  await writeRuntimeControlState(runDirectory, false);
+  assert.equal((await readRuntimeControlState(runDirectory))?.operatorPaused, false);
 });

@@ -37,6 +37,7 @@ import {
 import {
   readRuntimeConfigAck,
   readRuntimeMediaState,
+  writeRuntimeControlState,
   writeRuntimeConfigRequest,
   type MutableRuntimeConfiguration,
   type RuntimeConfigAck,
@@ -47,7 +48,8 @@ import {
   currentCredentialStatus,
   queueChallenge,
 } from "./runner.js";
-import { restoreFromRecovery } from "./save-guard.js";
+import { runWorkerIsActive, stopRunWorker } from "./run-worker.js";
+import { cleanupPrivateGameAudio } from "./private-audio.js";
 import { discoverInstalledSteamGames } from "./steam-catalog.js";
 import {
   discoverVirtualCameraDevices,
@@ -275,6 +277,7 @@ export class ControlPlane {
         accountPool,
         recording: recordingStatus(checkpoint, mediaState),
         virtualCamera: virtualCameraStatus(checkpoint, mediaState),
+        virtualMicrophone: virtualMicrophoneStatus(checkpoint, mediaState),
       });
       return;
     }
@@ -379,15 +382,8 @@ export class ControlPlane {
       const currentDirectory = await readActiveRun(this.rootDirectory);
       if (currentDirectory) {
         const current = (await CheckpointStore.load(currentDirectory)).snapshot();
-        if (!isTerminal(current.phase) && current.phase !== "paused") {
+        if (!isTerminal(current.phase)) {
           throw new HttpError(409, `A challenge is already ${current.phase}`);
-        }
-        if (current.phase === "paused" && current.options.isolateSaves && current.savePrepared) {
-          const recoveryPath = path.join(currentDirectory, "save-recovery.json");
-          const recovery = JSON.parse(await readFile(recoveryPath, "utf8")) as {
-            restoredAt?: string;
-          };
-          if (!recovery.restoredAt) await restoreFromRecovery(recoveryPath);
         }
         await clearActiveRun(this.rootDirectory, currentDirectory);
       }
@@ -574,14 +570,16 @@ export class ControlPlane {
         return;
       }
       if (checkpoint.pid !== null && processMatches(checkpoint.pid, checkpoint.pidStartTicks)) {
-        await (await CheckpointStore.load(checkpoint.runDirectory)).update({
-          phase: "paused", retryAt: null, reason: "Pause requested from control plane",
-        });
-        process.kill(checkpoint.pid, "SIGINT");
+        await writeRuntimeControlState(checkpoint.runDirectory, true);
+        process.kill(checkpoint.pid, "SIGUSR1");
+      } else if (await runWorkerIsActive(checkpoint.runId)) {
+        await writeRuntimeControlState(checkpoint.runDirectory, true);
       } else {
+        await writeRuntimeControlState(checkpoint.runDirectory, true);
         await (await CheckpointStore.load(checkpoint.runDirectory)).update({
           phase: "paused", pid: null, pidStartTicks: null, retryAt: null,
-          reason: "Paused from control plane",
+          gameRuntimeReady: false, gameRuntimeFrozen: false,
+          reason: "Exact in-memory runtime is unavailable; automatic relaunch is disabled",
         });
       }
       json(response, 202, { accepted: true, action: "pause" });
@@ -590,11 +588,28 @@ export class ControlPlane {
     if (request.method === "POST" && url.pathname === "/api/control/resume") {
       const checkpoint = await requiredCheckpoint(this.rootDirectory);
       if (checkpoint.phase !== "paused") throw new HttpError(409, "Challenge is not paused");
-      await (await CheckpointStore.load(checkpoint.runDirectory)).update({
-        phase: "waiting_retry", pid: null, pidStartTicks: null,
-        retryAt: new Date().toISOString(), reason: "Resumed from control plane",
-      });
-      await registerActiveRun(this.rootDirectory, checkpoint.runDirectory);
+      if (
+        checkpoint.pid === null ||
+        !processMatches(checkpoint.pid, checkpoint.pidStartTicks)
+      ) {
+        if (checkpoint.attempt === 0 && !(await runWorkerIsActive(checkpoint.runId))) {
+          await writeRuntimeControlState(checkpoint.runDirectory, false);
+          await (await CheckpointStore.load(checkpoint.runDirectory)).update({
+            phase: "waiting_retry",
+            retryAt: new Date().toISOString(),
+            reason: "Queued challenge resumed before its game runtime started",
+          });
+          await registerActiveRun(this.rootDirectory, checkpoint.runDirectory);
+          json(response, 202, { accepted: true, action: "resume" });
+          return;
+        }
+        throw new HttpError(
+          409,
+          "Exact in-memory runtime is unavailable; refusing to relaunch the game",
+        );
+      }
+      await writeRuntimeControlState(checkpoint.runDirectory, false);
+      process.kill(checkpoint.pid, "SIGUSR2");
       json(response, 202, { accepted: true, action: "resume" });
       return;
     }
@@ -888,8 +903,14 @@ async function stopAndCancel(checkpoint: RunCheckpoint): Promise<void> {
     while (Date.now() < deadline && processMatches(checkpoint.pid, checkpoint.pidStartTicks)) {
       await delay(250);
     }
+    if (processMatches(checkpoint.pid, checkpoint.pidStartTicks)) {
+      await stopRunWorker(checkpoint.runId).catch(() => undefined);
+    }
+  } else if (await runWorkerIsActive(checkpoint.runId)) {
+    await stopRunWorker(checkpoint.runId).catch(() => undefined);
   }
   await cancelChallenge(checkpoint.runDirectory).catch(() => undefined);
+  await cleanupPrivateGameAudio(checkpoint.runId).catch(() => undefined);
 }
 
 async function accountPoolSnapshot(checkpoint: RunCheckpoint | null): Promise<AccountPoolState | null> {
@@ -957,6 +978,15 @@ function statusSnapshot(options: {
       reason: checkpoint?.reason ?? null,
       snapshot: options.challenge,
     },
+    continuity: {
+      mode: "retained-live-process",
+      runtimeRetained:
+        hasLiveRunner(checkpoint) && checkpoint.gameRuntimeReady === true,
+      runtimeFrozen:
+        hasLiveRunner(checkpoint) && checkpoint.gameRuntimeFrozen === true,
+      coldRelaunchAllowed: false,
+      daemonRestartSafe: true,
+    },
     configuration: configurationStatus(
       checkpoint,
       options.rootDirectory,
@@ -981,6 +1011,7 @@ function statusSnapshot(options: {
       available: options.virtualCameras.some((device) => device.writable),
       devices: options.virtualCameras,
     },
+    virtualMicrophone: virtualMicrophoneStatus(checkpoint, options.mediaState),
   };
 }
 
@@ -1180,6 +1211,28 @@ function virtualCameraStatus(
   };
 }
 
+function virtualMicrophoneStatus(
+  checkpoint: RunCheckpoint | null,
+  mediaState: RuntimeMediaState | null,
+) {
+  if (!checkpoint) {
+    return {
+      enabled: false,
+      active: false,
+      name: null,
+      label: "Astra Game Microphone",
+      lastError: null,
+    };
+  }
+  return {
+    enabled: checkpoint.options.virtualCamera,
+    active: hasLiveRunner(checkpoint) && mediaState?.virtualMicrophoneActive === true,
+    name: mediaState?.virtualMicrophoneName ?? null,
+    label: "Astra Game Microphone",
+    lastError: mediaState?.virtualMicrophoneError ?? mediaState?.lastError ?? null,
+  };
+}
+
 function hasLiveRunner(checkpoint: RunCheckpoint | null): checkpoint is RunCheckpoint & { pid: number } {
   return checkpoint?.pid !== null &&
     checkpoint?.pid !== undefined &&
@@ -1188,16 +1241,18 @@ function hasLiveRunner(checkpoint: RunCheckpoint | null): checkpoint is RunCheck
 
 async function lastRuntimeFrame(checkpoint: RunCheckpoint) {
   for (let attempt = checkpoint.attempt; attempt >= 1; attempt--) {
-    const filename = path.join(
-      checkpoint.runDirectory,
-      "runtime-snapshots",
-      `attempt-${String(attempt).padStart(4, "0")}.jpg`,
-    );
-    try {
-      const data = await readFile(filename);
-      return { data, type: "image/jpeg", etag: `"runtime-${attempt}-${data.length}"` };
-    } catch {
-      // Try the preceding attempt.
+    for (const directory of ["frame-checkpoints", "runtime-snapshots"]) {
+      const filename = path.join(
+        checkpoint.runDirectory,
+        directory,
+        `attempt-${String(attempt).padStart(4, "0")}.jpg`,
+      );
+      try {
+        const data = await readFile(filename);
+        return { data, type: "image/jpeg", etag: `"runtime-${attempt}-${data.length}"` };
+      } catch {
+        // Try the legacy directory, then the preceding attempt.
+      }
     }
   }
   return null;
@@ -1264,7 +1319,7 @@ function parseMutableConfiguration(
   checkpoint: RunCheckpoint,
   options: Awaited<ReturnType<typeof loadOptions>>,
 ): Partial<MutableRuntimeConfiguration> {
-  const immutable = ["game", "gameAppId", "gpuPreference"];
+  const immutable = ["game", "gameAppId", "gpuPreference", "launchMode", "offlineMode"];
   for (const field of immutable) {
     if (field in body) {
       throw new HttpError(409, `${field} cannot be changed during a challenge`);
@@ -1273,7 +1328,6 @@ function parseMutableConfiguration(
   const allowed = new Set([
     "model",
     "reasoningEffort",
-    "launchMode",
     "record",
     "virtualCamera",
     "virtualCameraDevice",
@@ -1308,10 +1362,6 @@ function parseMutableConfiguration(
     patch.model = model;
   }
   if ("reasoningEffort" in body) patch.reasoningEffort = parseReasoning(body.reasoningEffort);
-  if ("launchMode" in body) {
-    patch.launchMode = parseLaunchMode(body.launchMode);
-    patch.offlineMode = patch.launchMode === "direct";
-  }
   if ("record" in body) patch.record = strictBoolean(body.record, "record");
   if ("virtualCamera" in body) {
     patch.virtualCamera = strictBoolean(body.virtualCamera, "virtualCamera");

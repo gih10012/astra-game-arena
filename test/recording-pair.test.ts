@@ -112,6 +112,10 @@ test("reports a recorder that dies after startup", async () => {
               environment: process.env,
             },
             captureWayland: { output: "HEADLESS-1", environment: process.env },
+            frozen: false,
+            frozenProcessIds: [],
+            pause: async () => [],
+            resume: async () => [],
             close: async () => undefined,
           },
           dashboard: {

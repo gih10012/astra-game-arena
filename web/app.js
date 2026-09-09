@@ -250,7 +250,7 @@ function renderVirtualCameras(configuredDevice) {
     ? configuredDevice : cameras[0]?.device || "/dev/video10";
   byId("virtual-camera-toggle").disabled = !cameras.some((camera) => camera.writable);
   byId("virtual-camera-detail").textContent = cameras.length
-    ? "输出正式片同款 1920×1080 / 30 fps 合成画面"
+    ? "输出正式片同款画面，并同步发布仅含游戏内音频的虚拟麦克风"
     : "需要 v4l2loopback；实体摄像头不会被用作输出设备";
   updateVirtualCameraControls();
 }
@@ -328,9 +328,10 @@ function updateConfigurationMode() {
   const active = activeChallenge();
   byId("game-select").disabled = active;
   byId("gpu-select").disabled = active;
+  byId("launch-mode-select").disabled = active;
   byId("start-button").textContent = active ? "保存并立即应用" : "从零开始挑战";
   byId("configuration-mode-note").textContent = active
-    ? "挑战运行中：仅游戏和 GPU 锁定；目标与 Agent 功能开关通过同线程热重载即时生效。修改启动方式会封片并重启私有游戏运行时。"
+    ? "挑战运行中：游戏、GPU 和启动方式锁定；其余配置通过同线程热重载即时生效，游戏进程不会重启。"
     : "";
 }
 
@@ -362,7 +363,7 @@ async function submitChallenge(event) {
   byId("form-message").textContent = active ? "正在保存…" : "正在排队…";
   try {
     const mutable = {
-      launchMode: byId("launch-mode-select").value,
+      ...(!active ? { launchMode: byId("launch-mode-select").value } : {}),
       model: byId("model-select").value,
       reasoningEffort: byId("reasoning-select").value,
       record: byId("record-toggle").checked,
@@ -444,6 +445,10 @@ async function refreshSupervisor() {
     byId("virtual-camera-state").textContent = camera?.active
       ? `LIVE ${camera.device}`
       : camera?.enabled ? `PAUSED ${camera.device}` : "OFF";
+    const microphone = state.supervisor.virtualMicrophone;
+    byId("virtual-microphone-state").textContent = microphone?.active
+      ? `LIVE ${microphone.label || microphone.name}`
+      : microphone?.enabled ? `PAUSED ${microphone.label || "Astra Game Microphone"}` : "OFF";
     const runnerLive = Boolean(state.supervisor.active && checkpoint?.pid);
     updateLivePreview(runnerLive
       ? { active: true, device: camera?.active ? camera.device : "private-runtime" }

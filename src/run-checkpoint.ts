@@ -70,6 +70,8 @@ export interface RunCheckpoint {
   attempt: number;
   pid: number | null;
   pidStartTicks: string | null;
+  gameRuntimeReady?: boolean;
+  gameRuntimeFrozen?: boolean;
   threadId: string | null;
   retryAt: string | null;
   reason: string | null;
@@ -129,6 +131,8 @@ export class CheckpointStore {
     value.options.virtualCameraDevice ??= "/dev/video10";
     value.options.gpuPreference ??= "auto";
     value.options.offlineMode ??= false;
+    value.gameRuntimeReady ??= false;
+    value.gameRuntimeFrozen ??= false;
     const store = new CheckpointStore(filename, value);
     if (relocated) await store.update({});
     return store;

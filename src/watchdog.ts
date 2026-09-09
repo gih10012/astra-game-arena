@@ -1,4 +1,3 @@
-import { spawn, type ChildProcess } from "node:child_process";
 import { access, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,9 +12,11 @@ import {
 import {
   powerAllowsResume,
   readPowerState,
-  shouldSnapshotForLowBattery,
+  shouldPauseForLowBattery,
 } from "./power.js";
 import { ControlPlane } from "./control-plane.js";
+import { launchRunWorker, runWorkerIsActive } from "./run-worker.js";
+import { cleanupPrivateGameAudio } from "./private-audio.js";
 
 const SERVICE_NAME = "astra-game-arena-watchdog.service";
 const ASSEMBLY_SERVICE_NAME = "astra-game-arena-assembler.service";
@@ -40,7 +41,6 @@ export async function runWatchdog(
   let stopping = false;
   const controlPlane = new ControlPlane(root, { port: 4317 });
   const controlUrl = await controlPlane.listen();
-  let child: ChildProcess | null = null;
   let wakePending: (() => void) | null = null;
   const wait = (milliseconds: number) =>
     new Promise<void>((resolve) => {
@@ -56,7 +56,6 @@ export async function runWatchdog(
   const stop = () => {
     stopping = true;
     wake();
-    if (child?.exitCode === null) child.kill("SIGTERM");
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
@@ -95,8 +94,12 @@ export async function runWatchdog(
         await wait(pollMs);
         continue;
       }
+      if (await runWorkerIsActive(checkpoint.runId)) {
+        await wait(pollMs);
+        continue;
+      }
       const power = await readPowerState();
-      if (shouldSnapshotForLowBattery(power)) {
+      if (shouldPauseForLowBattery(power)) {
         if (checkpoint.phase !== "waiting_power") {
           checkpoint = await store.update({
             phase: "waiting_power",
@@ -113,14 +116,19 @@ export async function runWatchdog(
         await wait(pollMs);
         continue;
       }
-      if (checkpoint.phase === "running" || checkpoint.phase === "starting") {
-        checkpoint = await store.update({
-          phase: "waiting_retry",
+      if (checkpoint.attempt > 0) {
+        await cleanupPrivateGameAudio(checkpoint.runId).catch(() => undefined);
+        await store.update({
+          phase: "paused",
           pid: null,
           pidStartTicks: null,
-          retryAt: new Date().toISOString(),
-          reason: "Watchdog recovered an interrupted runner",
+          gameRuntimeReady: false,
+          gameRuntimeFrozen: false,
+          retryAt: null,
+          reason:
+            "Exact in-memory runtime is unavailable; automatic game relaunch is disabled",
         });
+        continue;
       }
 
       const retryTime = checkpoint.retryAt
@@ -140,16 +148,25 @@ export async function runWatchdog(
       console.log(
         `Resuming ${checkpoint.runId}, attempt ${checkpoint.attempt + 1}`,
       );
-      child = spawn(process.execPath, [cliEntry, "resume", runDirectory], {
-        cwd: root,
-        env: environment,
-        stdio: "inherit",
-      });
-      await new Promise<void>((resolve) => {
-        child?.once("exit", () => resolve());
-        child?.once("error", () => resolve());
-      });
-      child = null;
+      try {
+        await launchRunWorker({
+          runId: checkpoint.runId,
+          rootDirectory: root,
+          cliEntry,
+          runDirectory,
+        });
+      } catch (error) {
+        console.error(`Cannot start challenge worker: ${String(error)}`);
+        await store.update({
+          phase: "waiting_retry",
+          pid: null,
+          pidStartTicks: null,
+          gameRuntimeReady: false,
+          gameRuntimeFrozen: false,
+          retryAt: new Date(Date.now() + 10_000).toISOString(),
+          reason: `Challenge worker launch failed: ${String(error)}`,
+        });
+      }
       if (!stopping) await wait(1_000);
     }
   } finally {
@@ -246,7 +263,8 @@ WantedBy=default.target
     { force: true },
   );
   await expectSystemctl(["daemon-reload"]);
-  await expectSystemctl(["enable", "--now", ASSEMBLY_SERVICE_NAME]);
+  await expectSystemctl(["enable", ASSEMBLY_SERVICE_NAME]);
+  await expectSystemctl(["restart", ASSEMBLY_SERVICE_NAME]);
   return servicePath;
 }
 

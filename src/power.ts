@@ -7,11 +7,11 @@ export interface PowerState {
   externalPower: boolean;
 }
 
-export const LOW_BATTERY_SNAPSHOT_PERCENT = 3;
+export const LOW_BATTERY_PAUSE_PERCENT = 3;
 
-export function shouldSnapshotForLowBattery(state: PowerState): boolean {
+export function shouldPauseForLowBattery(state: PowerState): boolean {
   return state.batteryPercent !== null &&
-    state.batteryPercent <= LOW_BATTERY_SNAPSHOT_PERCENT &&
+    state.batteryPercent <= LOW_BATTERY_PAUSE_PERCENT &&
     state.discharging &&
     !state.externalPower;
 }
@@ -19,7 +19,7 @@ export function shouldSnapshotForLowBattery(state: PowerState): boolean {
 export function powerAllowsResume(state: PowerState): boolean {
   return state.externalPower ||
     state.batteryPercent === null ||
-    state.batteryPercent > LOW_BATTERY_SNAPSHOT_PERCENT;
+    state.batteryPercent > LOW_BATTERY_PAUSE_PERCENT;
 }
 
 export async function readPowerState(

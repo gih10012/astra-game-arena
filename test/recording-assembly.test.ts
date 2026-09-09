@@ -105,7 +105,7 @@ test("requires seal evidence for paired-recorder composites", () => {
   });
 });
 
-test("cuts resumed parts at their active snapshot boundary", () => {
+test("keeps every sealed frame when joining resumed recording parts", () => {
   const snapshot = (elapsedMs: number) => ({ time: { elapsedMs } });
   const events = [
     {
@@ -157,12 +157,8 @@ test("cuts resumed parts at their active snapshot boundary", () => {
       "recordings/challenge-part-0002.mkv",
     ]),
     [
-      { attempt: 1, trimStartSeconds: 0, activeDurationSeconds: 10 },
-      {
-        attempt: 2,
-        trimStartSeconds: 3,
-        activeDurationSeconds: 20,
-      },
+      { attempt: 1, trimStartSeconds: 0, activeDurationSeconds: null },
+      { attempt: 2, trimStartSeconds: 0, activeDurationSeconds: null },
     ],
   );
 });
@@ -198,7 +194,7 @@ test("keeps the initial title interval in the attempt-one elapsed baseline", () 
 
   assert.deepEqual(
     recordingCuts(events, ["recordings/challenge-part-0001.mkv"]),
-    [{ attempt: 1, trimStartSeconds: 0, activeDurationSeconds: 11 }],
+    [{ attempt: 1, trimStartSeconds: 0, activeDurationSeconds: null }],
   );
 });
 
@@ -248,7 +244,7 @@ test("omits a sealed but invalid paired recording", async () => {
   assert.equal(recordingTimingReconciliation(persisted, result), null);
 });
 
-test("omits a sealed part whose resume cut leaves less than one frame", async () => {
+test("keeps a sealed resumed part instead of trimming its opening", async () => {
   const runDirectory = await createAssemblyRun();
   await Promise.all([
     createVideo(path.join(runDirectory, "recordings/challenge-part-0001.mkv")),
@@ -283,14 +279,10 @@ test("omits a sealed part whose resume cut leaves less than one frame", async ()
   ]);
 
   const result = await assembleRecordings(runDirectory);
-  assert.deepEqual(result.cuts.map((cut) => cut.attempt), [1]);
-  assert.equal(result.activeElapsedMs, 20_811);
-  assert.deepEqual(result.omittedParts, [{
-    attempt: 2,
-    filename: "recordings/challenge-part-0002.mkv",
-    reason: "empty-cut",
-  }]);
-  assert.equal(result.sources.length, 1);
+  assert.deepEqual(result.cuts.map((cut) => cut.attempt), [1, 2]);
+  assert.equal(result.activeElapsedMs, 39_907);
+  assert.deepEqual(result.omittedParts, []);
+  assert.equal(result.sources.length, 2);
   assert.match(result.sources[0] ?? "", /challenge-part-0001\.mkv$/);
   assert.ok(result.durationSeconds > 0);
 
@@ -300,12 +292,7 @@ test("omits a sealed part whose resume cut leaves less than one frame", async ()
     { attempt: 1, game: "game-1.mkv", dashboard: "dashboard-1.mkv" },
     { attempt: 2, game: "game-2.mkv", dashboard: "dashboard-2.mkv" },
   ];
-  assert.deepEqual(recordingTimingReconciliation(persisted, result), {
-    beforeElapsedMs: 39_907,
-    afterElapsedMs: 20_811,
-    omittedAttempts: [2],
-    reason: "Excluded resumed recording cuts that contain no playable frame",
-  });
+  assert.equal(recordingTimingReconciliation(persisted, result), null);
 });
 
 async function createAssemblyRun(): Promise<string> {

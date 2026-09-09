@@ -118,7 +118,7 @@ test("serves live supervisor state to the private director", async (context) => 
   assert.equal(second.recording.active, true);
 });
 
-test("serves a durable holding frame before the live game is restored", async (context) => {
+test("serves an initial audit frame until the first live frame arrives", async (context) => {
   const webRoot = await mkdtemp(path.join(os.tmpdir(), "arena-web-"));
   await Promise.all([
     writeFile(path.join(webRoot, "index.html"), "ok"),

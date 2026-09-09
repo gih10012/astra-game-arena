@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./command.js";
 import type { InstalledSteamGame } from "./steam-catalog.js";
+import { createProcessRuntimeGate } from "./process-runtime-gate.js";
 import {
   prepareSteamLoginMode,
   SteamLoginStateUnavailableError,
@@ -59,6 +60,10 @@ export interface VirtualGameRuntime {
     output: string;
     environment: NodeJS.ProcessEnv;
   };
+  readonly frozen: boolean;
+  readonly frozenProcessIds: readonly number[];
+  pause(): Promise<readonly number[]>;
+  resume(): Promise<readonly number[]>;
   close(): Promise<void>;
 }
 
@@ -142,6 +147,8 @@ export async function startVirtualGame(options: {
   gpuPreference?: "auto" | "integrated" | "discrete";
   launchMode?: "steam-online" | "steam-offline" | "direct";
   offlineMode?: boolean;
+  audioSinkName?: string;
+  runtimeId?: string;
   signal?: AbortSignal;
 }): Promise<VirtualGameRuntime> {
   throwIfStartupAborted(options.signal);
@@ -162,6 +169,9 @@ export async function startVirtualGame(options: {
   const launchStrategy = gameLaunchStrategy(
     options.game,
     options.launchMode ?? (options.offlineMode === true ? "direct" : false),
+  );
+  const runtimeGate = createProcessRuntimeGate(
+    options.runtimeId ?? path.basename(options.runtimeDirectory),
   );
   const steamEnabled = launchStrategy !== "direct-offline";
   const directExecutableLaunch = shouldDirectLaunchGame(launchStrategy);
@@ -188,6 +198,15 @@ export async function startVirtualGame(options: {
   await access(cageHostEntry);
 
   const runtimeEnvironment = withoutPhysicalDisplay(process.env);
+  const sessionRuntimeDirectory = process.env.XDG_RUNTIME_DIR;
+  if (options.audioSinkName) {
+    runtimeEnvironment.PULSE_SINK = options.audioSinkName;
+    runtimeEnvironment.PULSE_PROP = "application.name=Astra Private Game";
+    if (sessionRuntimeDirectory) {
+      runtimeEnvironment.PULSE_SERVER ??= `unix:${sessionRuntimeDirectory}/pulse/native`;
+      runtimeEnvironment.PIPEWIRE_RUNTIME_DIR ??= sessionRuntimeDirectory;
+    }
+  }
   applyGpuPreference(runtimeEnvironment, options.gpuPreference ?? "auto");
   const runtimeBase = process.env.XDG_RUNTIME_DIR || os.tmpdir();
   const waylandRuntimeDirectory = await mkdtemp(path.join(runtimeBase, "astra-game-"));
@@ -247,6 +266,7 @@ export async function startVirtualGame(options: {
     };
     const gameEnvironment: NodeJS.ProcessEnv = {
       ...childEnvironment,
+      ...runtimeGate.environment,
       STEAM_COMPAT_DATA_PATH: path.join(steamRoot, "steamapps/compatdata", options.game.appId),
       STEAM_COMPAT_CLIENT_INSTALL_PATH: steamRoot,
       SteamAppId: options.game.appId,
@@ -293,6 +313,7 @@ export async function startVirtualGame(options: {
     if (steamEnabled) {
       steamEnvironment = {
         ...childEnvironment,
+        ...runtimeGate.environment,
         PROTON_LOG: "1",
         PROTON_LOG_DIR: options.runtimeDirectory,
       };
@@ -404,8 +425,17 @@ export async function startVirtualGame(options: {
         output: captureOutput,
         environment: captureEnvironment,
       },
+      get frozen() {
+        return runtimeGate.frozen;
+      },
+      get frozenProcessIds() {
+        return runtimeGate.processIds;
+      },
+      pause: () => runtimeGate.freeze(),
+      resume: () => runtimeGate.thaw(),
       close: async () => {
         await runCleanupSteps([
+          () => runtimeGate.thaw(),
           () => { if (gameProcess) stopProcessGroup(gameProcess, "SIGTERM"); },
           () => delay(500),
           () => proton ? stopProtonPrefix(proton, gameEnvironment) : undefined,
@@ -431,6 +461,7 @@ export async function startVirtualGame(options: {
   } catch (error) {
     try {
       await runCleanupSteps([
+        () => runtimeGate.thaw(),
         async () => {
           if (!cleanupSteamEnvironment) return;
           await runCommand("steam", ["-shutdown"], {

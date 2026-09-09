@@ -5,6 +5,7 @@ import { durableJsonWrite, type PersistedRunOptions } from "./run-checkpoint.js"
 export const RUNTIME_CONFIG_REQUEST = "runtime-config-request.json";
 export const RUNTIME_CONFIG_ACK = "runtime-config-ack.json";
 export const RUNTIME_MEDIA_STATE = "runtime-media-state.json";
+export const RUNTIME_CONTROL_STATE = "runtime-control-state.json";
 const RUNTIME_CONFIG_DIRECTORY = "runtime-configuration";
 
 export type MutableRuntimeConfiguration = Pick<
@@ -49,7 +50,16 @@ export interface RuntimeMediaState {
   virtualCameraActive: boolean;
   virtualCameraDevice: string | null;
   virtualCameraError: string | null;
+  virtualMicrophoneActive?: boolean;
+  virtualMicrophoneName?: string | null;
+  virtualMicrophoneError?: string | null;
   lastError?: string | null;
+}
+
+export interface RuntimeControlState {
+  version: 1;
+  updatedAt: string;
+  operatorPaused: boolean;
 }
 
 export function runtimeConfigRequestPath(
@@ -72,6 +82,27 @@ export function runtimeConfigAckPath(
 
 export function runtimeMediaStatePath(runDirectory: string): string {
   return path.join(runDirectory, RUNTIME_MEDIA_STATE);
+}
+
+export function runtimeControlStatePath(runDirectory: string): string {
+  return path.join(runDirectory, RUNTIME_CONTROL_STATE);
+}
+
+export async function writeRuntimeControlState(
+  runDirectory: string,
+  operatorPaused: boolean,
+): Promise<void> {
+  await durableJsonWrite(runtimeControlStatePath(runDirectory), {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    operatorPaused,
+  } satisfies RuntimeControlState);
+}
+
+export async function readRuntimeControlState(
+  runDirectory: string,
+): Promise<RuntimeControlState | null> {
+  return await readVersioned<RuntimeControlState>(runtimeControlStatePath(runDirectory));
 }
 
 export async function writeRuntimeConfigRequest(
