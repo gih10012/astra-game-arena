@@ -19,6 +19,12 @@ const state = {
   broadcastFormVersion: "",
   playlistDraft: [],
   draftTimer: null,
+  replayFrameHandle: null,
+  replayFrameMode: null,
+  replayLastMediaTime: -1,
+  replayLastProgressAt: 0,
+  replayReconnects: 0,
+  eventSourceOpens: 0,
 };
 
 if (compact) document.body.classList.add("compact");
@@ -619,6 +625,7 @@ function applyBroadcastVolume() {
 }
 
 function stopBroadcastMedia() {
+  stopReplayCanvas();
   byId("broadcast-replay").hidden = true;
   const video = byId("replay-video");
   video.pause(); video.removeAttribute("src"); video.load();
@@ -628,6 +635,7 @@ function stopBroadcastMedia() {
 }
 
 function startLiveBroadcast() {
+  stopReplayCanvas();
   byId("broadcast-replay").hidden = true;
   const video = byId("replay-video");
   video.pause(); video.removeAttribute("src"); video.load();
@@ -644,16 +652,80 @@ function startReplay(index) {
   const selected = state.broadcast?.selected || [];
   if (!selected.length) { stopBroadcastMedia(); return; }
   state.broadcastIndex = Math.min(Math.max(0, index), selected.length - 1);
+  state.replayReconnects = 0;
+  loadReplayItem();
+}
+
+function loadReplayItem() {
+  const selected = state.broadcast?.selected || [];
   const item = selected[state.broadcastIndex];
+  if (!item) { stopBroadcastMedia(); return; }
   const audio = byId("live-audio");
   audio.pause(); audio.removeAttribute("src"); audio.load();
   updateLivePreview(null);
   byId("broadcast-replay").hidden = false;
   byId("replay-clip-name").textContent = item.name;
   const video = byId("replay-video");
+  stopReplayCanvas();
+  const canvas = byId("replay-canvas");
+  canvas.getContext("2d").fillRect(0, 0, canvas.width, canvas.height);
   video.src = `/api/broadcast/replay?id=${encodeURIComponent(item.id)}&t=${Date.now()}`;
+  state.replayLastMediaTime = -1;
+  state.replayLastProgressAt = performance.now();
   applyBroadcastVolume();
   video.play().catch(() => showBroadcastNote("回放等待自动播放；请检查 OBS Browser Source 的页面权限"));
+}
+
+function startReplayCanvas() {
+  if (state.replayFrameHandle !== null) return;
+  const video = byId("replay-video");
+  const canvas = byId("replay-canvas");
+  const context = canvas.getContext("2d", { alpha: false });
+  const paint = () => {
+    if (state.broadcast?.playback?.mode !== "replay" || video.paused || video.ended) {
+      state.replayFrameHandle = null;
+      state.replayFrameMode = null;
+      return;
+    }
+    if (video.readyState >= 2 && video.videoWidth > 0) {
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    }
+    if (typeof video.requestVideoFrameCallback === "function") {
+      state.replayFrameMode = "video";
+      state.replayFrameHandle = video.requestVideoFrameCallback(paint);
+    } else {
+      state.replayFrameMode = "animation";
+      state.replayFrameHandle = requestAnimationFrame(paint);
+    }
+  };
+  paint();
+}
+
+function stopReplayCanvas() {
+  const video = byId("replay-video");
+  if (state.replayFrameHandle !== null) {
+    if (state.replayFrameMode === "video" && typeof video.cancelVideoFrameCallback === "function") {
+      video.cancelVideoFrameCallback(state.replayFrameHandle);
+    } else if (state.replayFrameMode === "animation") {
+      cancelAnimationFrame(state.replayFrameHandle);
+    }
+  }
+  state.replayFrameHandle = null;
+  state.replayFrameMode = null;
+}
+
+function watchBroadcastMedia() {
+  if (!broadcast || state.broadcast?.playback?.mode !== "replay") return;
+  const video = byId("replay-video");
+  if (!video.paused && video.currentTime > state.replayLastMediaTime + 0.05) {
+    state.replayLastMediaTime = video.currentTime;
+    state.replayLastProgressAt = performance.now();
+    return;
+  }
+  if (performance.now() - state.replayLastProgressAt < 8_000) return;
+  state.replayReconnects += 1;
+  showBroadcastNote(`回放流停滞，正在重连（${state.replayReconnects}）`);
+  loadReplayItem();
 }
 
 function advanceReplay() {
@@ -827,6 +899,12 @@ async function bootstrap() {
 }
 
 const events = new EventSource("/api/events");
+events.addEventListener("open", () => {
+  state.eventSourceOpens += 1;
+  if (!broadcast || state.eventSourceOpens === 1) return;
+  state.broadcastModeKey = "";
+  void refreshBroadcast();
+});
 events.addEventListener("state", (event) => applySnapshot(JSON.parse(event.data)));
 events.addEventListener("transcript", (event) => addTranscript(JSON.parse(event.data)));
 events.addEventListener("transcript_reset", (event) => replaceTranscript(JSON.parse(event.data)));
@@ -853,7 +931,11 @@ byId("game-frame").addEventListener("error", () => {
 });
 
 byId("replay-video").addEventListener("ended", advanceReplay);
-byId("replay-video").addEventListener("playing", () => showBroadcastNote(""));
+byId("replay-video").addEventListener("playing", () => {
+  state.replayLastProgressAt = performance.now();
+  startReplayCanvas();
+  showBroadcastNote("");
+});
 byId("replay-video").addEventListener("error", () => {
   if (!broadcast || state.broadcast?.playback?.mode !== "replay") return;
   showBroadcastNote("回放文件无法解码，正在尝试播放列表下一项");
@@ -865,6 +947,10 @@ document.addEventListener("click", () => {
   const media = state.broadcast.playback.mode === "live" ? byId("live-audio") : byId("replay-video");
   media.play().catch(() => undefined);
 }, { passive: true });
+document.addEventListener("visibilitychange", () => {
+  if (!broadcast || document.hidden || state.broadcast?.playback?.mode !== "replay") return;
+  byId("replay-video").play().then(startReplayCanvas).catch(() => undefined);
+});
 
 if (!compact && !director && !broadcast) {
   byId("configure-button").addEventListener("click", () => { byId("configuration").hidden = false; });
@@ -903,4 +989,5 @@ if (!compact && !director && !broadcast) {
 }
 
 bootstrap().catch((error) => addTranscript({ type: "error", message: error.message }));
+setInterval(watchBroadcastMedia, 2_000);
 tick();

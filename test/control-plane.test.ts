@@ -57,6 +57,7 @@ test("serves the durable control page with every pre-run setting", async (contex
     "media-library",
     "broadcast-audio",
     "broadcast-replay",
+    "replay-canvas",
     "live-audio",
   ]) {
     assert.match(html, new RegExp(`id=["']${id}["']`));

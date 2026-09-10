@@ -18,6 +18,8 @@ test("director bootstrap uses the internal controller event and supervisor surfa
   assert.match(script, /events\.addEventListener\("broadcast"/);
   assert.match(script, /\/api\/live-audio\.ogg/);
   assert.match(script, /\/api\/broadcast\/replay\?id=/);
+  assert.match(script, /requestVideoFrameCallback/);
+  assert.match(script, /回放流停滞，正在重连/);
   assert.match(script, /configured\.webSearchEnabled === true/);
   assert.match(script, /configured\.browserUseEnabled === true/);
   assert.match(script, /toolCreationGuidance: byId\("tool-guidance-toggle"\)\.checked/);

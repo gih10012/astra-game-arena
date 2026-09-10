@@ -51,5 +51,11 @@ The normal control-page preview is deliberately muted to avoid feedback; this
 does not mute the OBS program page. The broadcast audio checkbox and volume
 setting apply immediately without pausing the game or Codex.
 
+Replay uses a hidden browser media element for decoding and audio, then paints
+every decoded frame into the visible 1920×1080 canvas. This keeps the program
+picture capturable in OBS and Wayland screenshots even when Chromium selects a
+hardware overlay plane. A progress watchdog reconnects a stalled replay, and a
+reconnected control-plane event rebuilds the media source after service restart.
+
 The optional V4L2 virtual camera and `Astra Game Microphone` remain available
 for meeting applications, but OBS does not need them when it uses `/live`.
