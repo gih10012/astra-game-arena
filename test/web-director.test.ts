@@ -6,7 +6,8 @@ import test from "node:test";
 test("director bootstrap uses the internal controller event and supervisor surfaces", async () => {
   const script = await readFile(path.resolve("web/app.js"), "utf8");
 
-  assert.match(script, /if \(!compact\) \{\s*if \(!director && !broadcast\) await loadOptions\(\);\s*await refreshSupervisor\(\);\s*await refreshBroadcast\(\);/);
+  assert.match(script, /const initialBroadcast = broadcast \? refreshBroadcast\(\) : null/);
+  assert.match(script, /await Promise\.all\(\[\s*refreshSupervisor\(\),\s*initialBroadcast \|\| refreshBroadcast\(\)/);
   assert.match(script, /state\.supervisor = await fetch\("\/api\/supervisor"/);
   assert.match(script, /const apiKeyActive = credential\?\.mode === "api-key"/);
   assert.match(script, /OAUTH POOL INACTIVE/);
@@ -17,9 +18,9 @@ test("director bootstrap uses the internal controller event and supervisor surfa
   assert.match(script, /events\.addEventListener\("frame"/);
   assert.match(script, /events\.addEventListener\("broadcast"/);
   assert.match(script, /\/api\/live-audio\.ogg/);
-  assert.match(script, /\/api\/broadcast\/replay\?id=/);
-  assert.match(script, /requestVideoFrameCallback/);
-  assert.match(script, /回放流停滞，正在重连/);
+  assert.match(script, /replay\.mjpeg/);
+  assert.match(script, /replay-audio\.ogg/);
+  assert.match(script, /回放画面流中断，正在重连/);
   assert.match(script, /configured\.webSearchEnabled === true/);
   assert.match(script, /configured\.browserUseEnabled === true/);
   assert.match(script, /toolCreationGuidance: byId\("tool-guidance-toggle"\)\.checked/);

@@ -19,10 +19,9 @@ const state = {
   broadcastFormVersion: "",
   playlistDraft: [],
   draftTimer: null,
-  replayFrameHandle: null,
-  replayFrameMode: null,
-  replayLastMediaTime: -1,
-  replayLastProgressAt: 0,
+  replayAdvanceTimer: null,
+  replayReconnectTimer: null,
+  replayGeneration: 0,
   replayReconnects: 0,
   eventSourceOpens: 0,
 };
@@ -618,34 +617,40 @@ function applyBroadcastVolume() {
   if (!broadcast || !state.broadcast) return;
   const configuration = state.broadcast.configuration;
   const muted = preview || !configuration.audioEnabled;
-  for (const media of [byId("replay-video"), byId("live-audio")]) {
+  for (const media of [byId("replay-audio"), byId("live-audio")]) {
     media.muted = muted;
     media.volume = configuration.volume;
   }
 }
 
 function stopBroadcastMedia() {
-  stopReplayCanvas();
+  clearReplayTimers();
+  state.replayGeneration += 1;
   byId("broadcast-replay").hidden = true;
-  const video = byId("replay-video");
-  video.pause(); video.removeAttribute("src"); video.load();
+  byId("replay-image").removeAttribute("src");
+  const replayAudio = byId("replay-audio");
+  replayAudio.pause(); replayAudio.removeAttribute("src"); replayAudio.load();
   const audio = byId("live-audio");
   audio.pause(); audio.removeAttribute("src"); audio.load();
   updateLivePreview(null);
 }
 
 function startLiveBroadcast() {
-  stopReplayCanvas();
+  clearReplayTimers();
+  state.replayGeneration += 1;
   byId("broadcast-replay").hidden = true;
-  const video = byId("replay-video");
-  video.pause(); video.removeAttribute("src"); video.load();
+  byId("replay-image").removeAttribute("src");
+  const replayAudio = byId("replay-audio");
+  replayAudio.pause(); replayAudio.removeAttribute("src"); replayAudio.load();
   updateLivePreview({ active: true, device: "private-runtime" });
   const audio = byId("live-audio");
   audio.src = `/api/live-audio.ogg?t=${Date.now()}`;
   applyBroadcastVolume();
-  if (state.broadcast.configuration.audioEnabled && !preview) {
-    audio.play().catch(() => showBroadcastNote("浏览器阻止了自动播放声音；OBS Browser Source 不受此交互限制"));
-  }
+  audio.play().catch(() => {
+    if (state.broadcast.configuration.audioEnabled && !preview) {
+      showBroadcastNote("浏览器阻止了自动播放声音；点击页面即可启用");
+    }
+  });
 }
 
 function startReplay(index) {
@@ -663,69 +668,37 @@ function loadReplayItem() {
   const audio = byId("live-audio");
   audio.pause(); audio.removeAttribute("src"); audio.load();
   updateLivePreview(null);
-  byId("broadcast-replay").hidden = false;
+  byId("broadcast-replay").hidden = true;
   byId("replay-clip-name").textContent = item.name;
-  const video = byId("replay-video");
-  stopReplayCanvas();
-  const canvas = byId("replay-canvas");
-  canvas.getContext("2d").fillRect(0, 0, canvas.width, canvas.height);
-  video.src = `/api/broadcast/replay?id=${encodeURIComponent(item.id)}&t=${Date.now()}`;
-  state.replayLastMediaTime = -1;
-  state.replayLastProgressAt = performance.now();
+  clearReplayTimers();
+  const generation = ++state.replayGeneration;
+  const image = byId("replay-image");
+  image.src = `/api/broadcast/replay.mjpeg?id=${encodeURIComponent(item.id)}&t=${Date.now()}`;
+  const replayAudio = byId("replay-audio");
+  replayAudio.pause(); replayAudio.removeAttribute("src"); replayAudio.load();
+  if (item.hasAudio) {
+    replayAudio.src = `/api/broadcast/replay-audio.ogg?id=${encodeURIComponent(item.id)}&t=${Date.now()}`;
+  }
   applyBroadcastVolume();
-  video.play().catch(() => showBroadcastNote("回放等待自动播放；请检查 OBS Browser Source 的页面权限"));
-}
-
-function startReplayCanvas() {
-  if (state.replayFrameHandle !== null) return;
-  const video = byId("replay-video");
-  const canvas = byId("replay-canvas");
-  const context = canvas.getContext("2d", { alpha: false });
-  const paint = () => {
-    if (state.broadcast?.playback?.mode !== "replay" || video.paused || video.ended) {
-      state.replayFrameHandle = null;
-      state.replayFrameMode = null;
-      return;
-    }
-    if (video.readyState >= 2 && video.videoWidth > 0) {
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    }
-    if (typeof video.requestVideoFrameCallback === "function") {
-      state.replayFrameMode = "video";
-      state.replayFrameHandle = video.requestVideoFrameCallback(paint);
-    } else {
-      state.replayFrameMode = "animation";
-      state.replayFrameHandle = requestAnimationFrame(paint);
-    }
-  };
-  paint();
-}
-
-function stopReplayCanvas() {
-  const video = byId("replay-video");
-  if (state.replayFrameHandle !== null) {
-    if (state.replayFrameMode === "video" && typeof video.cancelVideoFrameCallback === "function") {
-      video.cancelVideoFrameCallback(state.replayFrameHandle);
-    } else if (state.replayFrameMode === "animation") {
-      cancelAnimationFrame(state.replayFrameHandle);
-    }
+  if (item.hasAudio) {
+    replayAudio.play().catch(() => {
+      if (state.broadcast.configuration.audioEnabled && !preview) {
+        showBroadcastNote("浏览器阻止了自动播放声音；点击页面即可启用");
+      }
+    });
   }
-  state.replayFrameHandle = null;
-  state.replayFrameMode = null;
+  if (Number.isFinite(item.durationSeconds) && item.durationSeconds > 0) {
+    state.replayAdvanceTimer = setTimeout(() => {
+      if (generation === state.replayGeneration) advanceReplay();
+    }, item.durationSeconds * 1_000 + 1_500);
+  }
 }
 
-function watchBroadcastMedia() {
-  if (!broadcast || state.broadcast?.playback?.mode !== "replay") return;
-  const video = byId("replay-video");
-  if (!video.paused && video.currentTime > state.replayLastMediaTime + 0.05) {
-    state.replayLastMediaTime = video.currentTime;
-    state.replayLastProgressAt = performance.now();
-    return;
-  }
-  if (performance.now() - state.replayLastProgressAt < 8_000) return;
-  state.replayReconnects += 1;
-  showBroadcastNote(`回放流停滞，正在重连（${state.replayReconnects}）`);
-  loadReplayItem();
+function clearReplayTimers() {
+  clearTimeout(state.replayAdvanceTimer);
+  clearTimeout(state.replayReconnectTimer);
+  state.replayAdvanceTimer = null;
+  state.replayReconnectTimer = null;
 }
 
 function advanceReplay() {
@@ -881,6 +854,7 @@ async function assertJson(response) {
 }
 
 async function bootstrap() {
+  const initialBroadcast = broadcast ? refreshBroadcast() : null;
   const [snapshot, transcript] = await Promise.all([
     fetch("/api/challenge").then(assertJson),
     fetch("/api/transcript").then(assertJson),
@@ -890,8 +864,10 @@ async function bootstrap() {
   if (frameResponse.ok && frameResponse.status !== 204) showFrame("initial");
   if (!compact) {
     if (!director && !broadcast) await loadOptions();
-    await refreshSupervisor();
-    await refreshBroadcast();
+    await Promise.all([
+      refreshSupervisor(),
+      initialBroadcast || refreshBroadcast(),
+    ]);
     if (!director && !broadcast && !state.supervisor?.active) byId("configuration").hidden = false;
     setInterval(refreshSupervisor, 2_000);
     setInterval(refreshBroadcast, 2_000);
@@ -930,26 +906,31 @@ byId("game-frame").addEventListener("error", () => {
   showFrame("live-error");
 });
 
-byId("replay-video").addEventListener("ended", advanceReplay);
-byId("replay-video").addEventListener("playing", () => {
-  state.replayLastProgressAt = performance.now();
-  startReplayCanvas();
+byId("replay-image").addEventListener("load", () => {
+  if (state.broadcast?.playback?.mode !== "replay") return;
+  byId("broadcast-replay").hidden = false;
   showBroadcastNote("");
 });
-byId("replay-video").addEventListener("error", () => {
+byId("replay-image").addEventListener("error", () => {
   if (!broadcast || state.broadcast?.playback?.mode !== "replay") return;
-  showBroadcastNote("回放文件无法解码，正在尝试播放列表下一项");
-  setTimeout(advanceReplay, 1_500);
+  const generation = state.replayGeneration;
+  state.replayReconnects += 1;
+  showBroadcastNote(`回放画面流中断，正在重连（${state.replayReconnects}）`);
+  clearTimeout(state.replayReconnectTimer);
+  state.replayReconnectTimer = setTimeout(() => {
+    if (generation === state.replayGeneration) loadReplayItem();
+  }, 1_500);
 });
+byId("replay-audio").addEventListener("playing", () => showBroadcastNote(""));
 byId("live-audio").addEventListener("playing", () => showBroadcastNote(""));
 document.addEventListener("click", () => {
   if (!broadcast || preview || !state.broadcast?.configuration?.audioEnabled) return;
-  const media = state.broadcast.playback.mode === "live" ? byId("live-audio") : byId("replay-video");
+  const media = state.broadcast.playback.mode === "live" ? byId("live-audio") : byId("replay-audio");
   media.play().catch(() => undefined);
 }, { passive: true });
 document.addEventListener("visibilitychange", () => {
   if (!broadcast || document.hidden || state.broadcast?.playback?.mode !== "replay") return;
-  byId("replay-video").play().then(startReplayCanvas).catch(() => undefined);
+  byId("replay-audio").play().catch(() => undefined);
 });
 
 if (!compact && !director && !broadcast) {
@@ -989,5 +970,4 @@ if (!compact && !director && !broadcast) {
 }
 
 bootstrap().catch((error) => addTranscript({ type: "error", message: error.message }));
-setInterval(watchBroadcastMedia, 2_000);
 tick();

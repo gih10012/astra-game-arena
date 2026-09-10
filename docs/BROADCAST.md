@@ -37,10 +37,10 @@ absolute path. Adding a path does not copy, modify, or delete that file.
 The ordered selection and all live settings are durably written to
 `.arena/broadcast-config.json`, which is local and ignored by Git. The replay
 route only accepts opaque IDs that are currently selected; arbitrary path
-queries are rejected. FFmpeg reads each item at normal playback speed and emits
-a fragmented H.264/AAC MP4 that Chromium and OBS can play before the source
-file finishes. If a selected file has no audio track, it is naturally silent;
-files with audio deliver that audio through the same Browser Source.
+queries are rejected. FFmpeg reads each item at normal playback speed and
+server-decodes its picture into a continuous MJPEG stream. Audio, when present,
+is separately encoded as Opus inside the same page. OBS still receives both
+through its single Browser Source; silent source files remain silent.
 
 ## Audio isolation
 
@@ -51,11 +51,11 @@ The normal control-page preview is deliberately muted to avoid feedback; this
 does not mute the OBS program page. The broadcast audio checkbox and volume
 setting apply immediately without pausing the game or Codex.
 
-Replay uses a hidden browser media element for decoding and audio, then paints
-every decoded frame into the visible 1920×1080 canvas. This keeps the program
-picture capturable in OBS and Wayland screenshots even when Chromium selects a
-hardware overlay plane. A progress watchdog reconnects a stalled replay, and a
-reconnected control-plane event rebuilds the media source after service restart.
+Replay pictures are ordinary MJPEG `<img>` frames, so Chromium never invokes its
+hardware video decoder or overlay plane. This keeps the program picture visible
+in Edge, OBS, and Wayland captures even on affected GPU drivers. Playlist timing
+comes from server-side media metadata; interrupted streams reconnect, and a
+reconnected control-plane event rebuilds them after service restart.
 
 The optional V4L2 virtual camera and `Astra Game Microphone` remain available
 for meeting applications, but OBS does not need them when it uses `/live`.

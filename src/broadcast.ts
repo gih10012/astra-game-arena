@@ -3,10 +3,12 @@ import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { durableJsonWrite, type RunPhase } from "./run-checkpoint.js";
+import { runCommand } from "./command.js";
 
 export const BROADCAST_CONFIG_FILENAME = "broadcast-config.json";
 const VIDEO_EXTENSIONS = new Set([".mkv", ".mp4", ".m4v", ".mov", ".webm"]);
 const MAX_LIBRARY_ITEMS = 500;
+const mediaProbeCache = new Map<string, BroadcastMediaProbe>();
 
 export type BroadcastMode = "auto" | "live" | "replay";
 
@@ -42,6 +44,11 @@ export interface BroadcastMediaItem {
 export interface BroadcastPlaybackDecision {
   mode: "live" | "replay" | "standby";
   reason: string;
+}
+
+export interface BroadcastMediaProbe {
+  durationSeconds: number | null;
+  hasAudio: boolean;
 }
 
 export function broadcastConfigPath(rootDirectory: string): string {
@@ -236,6 +243,63 @@ export function replayFfmpegArguments(filename: string): string[] {
     "-frag_duration", "1000000",
     "-f", "mp4", "pipe:1",
   ];
+}
+
+export function replayMjpegFfmpegArguments(filename: string): string[] {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "warning",
+    "-re", "-i", filename,
+    "-map", "0:v:0", "-an", "-sn", "-dn",
+    "-vf",
+    "scale=1920:1080:force_original_aspect_ratio=decrease," +
+      "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,fps=30",
+    "-c:v", "mjpeg", "-q:v", "5",
+    "-flush_packets", "1", "-f", "mpjpeg", "pipe:1",
+  ];
+}
+
+export function replayAudioFfmpegArguments(filename: string): string[] {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "warning",
+    "-re", "-i", filename,
+    "-map", "0:a:0", "-vn", "-sn", "-dn",
+    "-ac", "2", "-ar", "48000",
+    "-c:a", "libopus", "-b:a", "128k",
+    "-application", "audio", "-frame_duration", "20",
+    "-flush_packets", "1", "-f", "ogg", "pipe:1",
+  ];
+}
+
+export async function probeBroadcastMedia(
+  item: BroadcastMediaItem,
+): Promise<BroadcastMediaProbe> {
+  const key = `${item.filename}:${item.bytes}:${item.modifiedAt}`;
+  const cached = mediaProbeCache.get(key);
+  if (cached) return cached;
+  const result = await runCommand("ffprobe", [
+    "-v", "error",
+    "-show_entries", "format=duration:stream=codec_type",
+    "-of", "json",
+    item.filename,
+  ], { timeoutMs: 10_000 });
+  let probe: BroadcastMediaProbe = { durationSeconds: null, hasAudio: false };
+  if (result.code === 0) {
+    try {
+      const parsed = JSON.parse(result.stdout.toString("utf8")) as {
+        format?: { duration?: string };
+        streams?: Array<{ codec_type?: string }>;
+      };
+      const duration = Number(parsed.format?.duration);
+      probe = {
+        durationSeconds: Number.isFinite(duration) && duration > 0 ? duration : null,
+        hasAudio: parsed.streams?.some((stream) => stream.codec_type === "audio") === true,
+      };
+    } catch {
+      // Invalid probe output leaves safe unknown/silent metadata.
+    }
+  }
+  mediaProbeCache.set(key, probe);
+  return probe;
 }
 
 export function liveAudioFfmpegArguments(source: string): string[] {

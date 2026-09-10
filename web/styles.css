@@ -200,17 +200,16 @@ body.compact.director footer { display: flex; }
 /* /live is the exact program feed added to OBS as one Browser Source. */
 body.broadcast { width: 1920px; height: 1080px; min-width: 1920px; min-height: 1080px; background: #070d0f; }
 body.broadcast .shell { position: relative; z-index: 1; }
-body.broadcast #live-audio { display: none; }
+body.broadcast #live-audio,
+body.broadcast #replay-audio { display: none; }
 .broadcast-replay {
   position: fixed; z-index: 100; inset: 0; width: 1920px; height: 1080px;
   overflow: hidden; background: #000;
 }
 .broadcast-replay[hidden] { display: none; }
-.broadcast-replay video {
-  position: absolute; width: 2px; height: 2px; opacity: .001;
-  pointer-events: none;
+.broadcast-replay img {
+  display: block; width: 1920px; height: 1080px; object-fit: contain; background: #000;
 }
-.broadcast-replay canvas { display: block; width: 1920px; height: 1080px; background: #000; }
 .replay-badge-overlay, .quota-reset-overlay, .broadcast-stream-note {
   position: absolute; z-index: 2; border: 1px solid #3f6963;
   background: rgba(5, 14, 16, .9); box-shadow: 0 8px 30px #0008;

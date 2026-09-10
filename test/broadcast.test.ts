@@ -9,7 +9,9 @@ import {
   discoverBroadcastMedia,
   liveAudioFfmpegArguments,
   readBroadcastConfiguration,
+  replayAudioFfmpegArguments,
   replayFfmpegArguments,
+  replayMjpegFfmpegArguments,
   selectedBroadcastMedia,
   writeBroadcastConfiguration,
 } from "../src/broadcast.js";
@@ -79,6 +81,13 @@ test("builds real-time browser-compatible replay and live-audio encoders", () =>
   assert.ok(replay.includes("frag_keyframe+empty_moov+default_base_moof"));
   assert.ok(replay.some((entry) => entry.includes("scale=1920:1080")));
   assert.ok(replay.includes("aac"));
+  const mjpeg = replayMjpegFfmpegArguments("/tmp/movie with spaces.mkv");
+  assert.ok(mjpeg.includes("mjpeg"));
+  assert.equal(mjpeg.at(-2), "mpjpeg");
+  assert.ok(mjpeg.some((entry) => entry.includes("scale=1920:1080")));
+  const replayAudio = replayAudioFfmpegArguments("/tmp/movie with spaces.mkv");
+  assert.ok(replayAudio.includes("libopus"));
+  assert.equal(replayAudio.at(-2), "ogg");
   const audio = liveAudioFfmpegArguments("arena-sink.monitor");
   assert.ok(audio.includes("pulse"));
   assert.ok(audio.includes("arena-sink.monitor"));

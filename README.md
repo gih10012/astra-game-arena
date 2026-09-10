@@ -201,7 +201,8 @@ The loopback director server exposes:
 - `PATCH /api/broadcast` — atomically save broadcast mode, rules, playlist order, badge, and volume without pausing a challenge
 - `POST /api/broadcast/media` — add an existing local video path to the replay library without copying or deleting it
 - `DELETE /api/broadcast/media?id=…` — forget a manually added path without deleting the underlying video
-- `GET /api/broadcast/replay?id=…` — real-time browser-compatible H.264/AAC replay stream for a selected playlist item
+- `GET /api/broadcast/replay.mjpeg?id=…` — server-decoded replay picture for a selected playlist item, avoiding browser GPU-video overlays
+- `GET /api/broadcast/replay-audio.ogg?id=…` — matching Opus audio when the selected item contains audio
 
 ## One-source OBS live page
 

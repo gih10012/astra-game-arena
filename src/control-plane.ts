@@ -58,8 +58,11 @@ import {
 import {
   determineBroadcastPlayback,
   discoverBroadcastMedia,
+  probeBroadcastMedia,
   readBroadcastConfiguration,
+  replayAudioFfmpegArguments,
   replayFfmpegArguments,
+  replayMjpegFfmpegArguments,
   selectedBroadcastMedia,
   validateManualBroadcastFile,
   writeBroadcastConfiguration,
@@ -113,6 +116,8 @@ interface PublicBroadcastMediaItem {
   source: BroadcastMediaItem["source"];
   bytes: number;
   modifiedAt: string;
+  durationSeconds?: number | null;
+  hasAudio?: boolean;
 }
 
 interface BroadcastSnapshot {
@@ -463,6 +468,31 @@ export class ControlPlane {
       this.#startReplay(response, item);
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/broadcast/replay.mjpeg") {
+      const item = await this.#selectedReplayItem(url.searchParams.get("id"));
+      this.#startReplayStream(
+        response,
+        item,
+        replayMjpegFfmpegArguments(item.filename),
+        "multipart/x-mixed-replace; boundary=ffmpeg",
+        "Replay video",
+      );
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/broadcast/replay-audio.ogg") {
+      const item = await this.#selectedReplayItem(url.searchParams.get("id"));
+      if (!(await probeBroadcastMedia(item)).hasAudio) {
+        throw new HttpError(409, "Replay media has no audio stream");
+      }
+      this.#startReplayStream(
+        response,
+        item,
+        replayAudioFfmpegArguments(item.filename),
+        "audio/ogg; codecs=opus",
+        "Replay audio",
+      );
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/events") {
       response.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -770,7 +800,8 @@ export class ControlPlane {
         "Content-Type": file.type,
         "Content-Length": body.byteLength,
         "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        Pragma: "no-cache",
       });
       response.end(request.method === "HEAD" ? undefined : body);
       return;
@@ -919,10 +950,14 @@ export class ControlPlane {
       liveAvailable,
       hasReplay: selected.length > 0,
     });
+    const selectedPublic = await Promise.all(selected.map(async (item) => ({
+      ...publicBroadcastMedia(item),
+      ...await probeBroadcastMedia(item),
+    })));
     return {
       configuration: publicBroadcastConfiguration(configuration, library),
       ...(includeLibrary ? { library: library.map(publicBroadcastMedia) } : {}),
-      selected: selected.map(publicBroadcastMedia),
+      selected: selectedPublic,
       playback: {
         ...playback,
         phase,
@@ -939,14 +974,39 @@ export class ControlPlane {
     return typeof address === "object" && address ? address.port : this.port;
   }
 
+  async #selectedReplayItem(id: string | null): Promise<BroadcastMediaItem> {
+    const configuration = await readBroadcastConfiguration(this.rootDirectory);
+    const library = await discoverBroadcastMedia(this.rootDirectory, configuration.manualFiles);
+    const item = selectedBroadcastMedia(configuration, library)
+      .find((entry) => entry.id === id);
+    if (!item) throw new HttpError(404, "Replay media is not in the active playlist");
+    return item;
+  }
+
   #startReplay(response: ServerResponse, item: BroadcastMediaItem): void {
-    const process = spawn("ffmpeg", replayFfmpegArguments(item.filename), {
+    this.#startReplayStream(
+      response,
+      item,
+      replayFfmpegArguments(item.filename),
+      "video/mp4",
+      "Replay",
+    );
+  }
+
+  #startReplayStream(
+    response: ServerResponse,
+    item: BroadcastMediaItem,
+    arguments_: string[],
+    contentType: string,
+    label: string,
+  ): void {
+    const process = spawn("ffmpeg", arguments_, {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.#replayStreams.set(response, process);
     response.writeHead(200, {
-      "Content-Type": "video/mp4",
+      "Content-Type": contentType,
       "Cache-Control": "no-store, no-cache, must-revalidate",
       Pragma: "no-cache",
       Connection: "close",
@@ -973,7 +1033,7 @@ export class ControlPlane {
       if (code !== 0 && stderr.trim()) {
         this.#broadcast("supervisor", {
           type: "supervisor.warning",
-          message: `Replay ${item.name} stopped: ${stderr.trim().slice(-1_000)}`,
+          message: `${label} ${item.name} stopped: ${stderr.trim().slice(-1_000)}`,
         });
       }
       finish();
