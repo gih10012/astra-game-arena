@@ -55,6 +55,17 @@ import {
   discoverVirtualCameraDevices,
   virtualCameraBrowserStreamArguments,
 } from "./virtual-camera.js";
+import {
+  determineBroadcastPlayback,
+  discoverBroadcastMedia,
+  readBroadcastConfiguration,
+  replayFfmpegArguments,
+  selectedBroadcastMedia,
+  validateManualBroadcastFile,
+  writeBroadcastConfiguration,
+  type BroadcastConfiguration,
+  type BroadcastMediaItem,
+} from "./broadcast.js";
 
 const webRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -95,6 +106,33 @@ interface ModelOption {
   defaultReasoningEffort: string;
 }
 
+interface PublicBroadcastMediaItem {
+  id: string;
+  name: string;
+  displayPath: string;
+  source: BroadcastMediaItem["source"];
+  bytes: number;
+  modifiedAt: string;
+}
+
+interface BroadcastSnapshot {
+  configuration: Omit<BroadcastConfiguration, "playlist" | "manualFiles"> & {
+    playlist: string[];
+    manualFileCount: number;
+  };
+  library?: PublicBroadcastMediaItem[];
+  selected: PublicBroadcastMediaItem[];
+  playback: {
+    mode: "live" | "replay" | "standby";
+    reason: string;
+    phase: RunCheckpoint["phase"] | null;
+    liveAvailable: boolean;
+    retryAt: string | null;
+  };
+  liveUrl: string;
+  resolution: { width: number; height: number };
+}
+
 export class ControlPlane {
   readonly rootDirectory: string;
   readonly host: string;
@@ -109,6 +147,7 @@ export class ControlPlane {
   #clients = new Set<ServerResponse>();
   #livePreviews = new Map<ServerResponse, ChildProcess>();
   #liveProxies = new Map<ServerResponse, ClientRequest>();
+  #replayStreams = new Map<ServerResponse, ChildProcess>();
   #lastStateJson = "";
   #lastTranscriptKey = "";
   #lastFrameEtag = "";
@@ -165,10 +204,18 @@ export class ControlPlane {
       client.end();
     }
     this.#liveProxies.clear();
+    for (const [client, process] of this.#replayStreams) {
+      stopLivePreview(process);
+      client.end();
+    }
+    this.#replayStreams.clear();
     if (!this.#server) return;
     const server = this.#server;
     this.#server = null;
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    });
   }
 
   async refresh(): Promise<void> {
@@ -243,13 +290,14 @@ export class ControlPlane {
     }
     if (request.method === "GET" && url.pathname === "/api/status") {
       const checkpoint = this.#checkpoint;
-      const [accountPool, virtualCameras, operatorConfiguration, mediaState] = await Promise.all([
+      const [accountPool, virtualCameras, operatorConfiguration, mediaState, broadcast] = await Promise.all([
         accountPoolSnapshot(checkpoint),
         discoverVirtualCameraDevices(),
         readOperatorConfiguration(this.rootDirectory),
         checkpoint ? readRuntimeMediaState(checkpoint.runDirectory) : null,
+        this.#broadcastSnapshot(false),
       ]);
-      json(response, 200, statusSnapshot({
+      json(response, 200, { ...statusSnapshot({
         rootDirectory: this.rootDirectory,
         host: this.host,
         port: this.port,
@@ -259,7 +307,7 @@ export class ControlPlane {
         virtualCameras,
         operatorConfiguration,
         mediaState,
-      }));
+      }), broadcast });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/supervisor") {
@@ -318,7 +366,13 @@ export class ControlPlane {
         if (typeof address === "object" && address?.port === checkpoint.options.port) {
           throw new HttpError(502, "The private runner stream points to the control-plane port");
         }
-        this.#startRunnerLivePreview(response, checkpoint.options.port);
+        this.#startRunnerProxy(
+          response,
+          checkpoint.options.port,
+          "/api/live.mjpeg",
+          "multipart/x-mixed-replace; boundary=ffmpeg",
+          "private game live stream",
+        );
         return;
       }
       const mediaState = checkpoint
@@ -331,6 +385,84 @@ export class ControlPlane {
       this.#startLivePreview(response, camera.device);
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/live-audio.ogg") {
+      const checkpoint = this.#checkpoint;
+      if (!hasLiveRunner(checkpoint) || checkpoint?.phase !== "running") {
+        throw new HttpError(409, "Live game audio is available while a challenge is running");
+      }
+      this.#startRunnerProxy(
+        response,
+        checkpoint.options.port,
+        "/api/live-audio.ogg",
+        "audio/ogg; codecs=opus",
+        "private game audio stream",
+      );
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/broadcast") {
+      json(response, 200, await this.#broadcastSnapshot(true));
+      return;
+    }
+    if (request.method === "PATCH" && url.pathname === "/api/broadcast") {
+      const body = await readJson(request);
+      const snapshot = await this.#serializeConfigurationUpdate(async () => {
+        const current = await readBroadcastConfiguration(this.rootDirectory);
+        const library = await discoverBroadcastMedia(this.rootDirectory, current.manualFiles);
+        const configuration = broadcastConfigurationPatch(current, body, library);
+        await writeBroadcastConfiguration(this.rootDirectory, configuration);
+        return await this.#broadcastSnapshot(true);
+      });
+      this.#broadcast("broadcast", snapshot);
+      json(response, 200, snapshot);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/broadcast/media") {
+      const body = await readJson(request);
+      const filename = await validateManualBroadcastFile(String(body.path ?? ""));
+      const snapshot = await this.#serializeConfigurationUpdate(async () => {
+        const current = await readBroadcastConfiguration(this.rootDirectory);
+        const manualFiles = [...new Set([...current.manualFiles, filename])];
+        const playlist = body.select === false
+          ? current.playlist
+          : [...new Set([...current.playlist, filename])];
+        await writeBroadcastConfiguration(this.rootDirectory, {
+          ...current,
+          manualFiles,
+          playlist,
+        });
+        return await this.#broadcastSnapshot(true);
+      });
+      this.#broadcast("broadcast", snapshot);
+      json(response, 201, snapshot);
+      return;
+    }
+    if (request.method === "DELETE" && url.pathname === "/api/broadcast/media") {
+      const id = url.searchParams.get("id") ?? "";
+      const snapshot = await this.#serializeConfigurationUpdate(async () => {
+        const current = await readBroadcastConfiguration(this.rootDirectory);
+        const library = await discoverBroadcastMedia(this.rootDirectory, current.manualFiles);
+        const item = library.find((entry) => entry.id === id && entry.source === "manual");
+        if (!item) throw new HttpError(404, "Manual replay path is unavailable");
+        await writeBroadcastConfiguration(this.rootDirectory, {
+          ...current,
+          manualFiles: current.manualFiles.filter((filename) => path.resolve(filename) !== item.filename),
+          playlist: current.playlist.filter((filename) => filename !== item.filename),
+        });
+        return await this.#broadcastSnapshot(true);
+      });
+      this.#broadcast("broadcast", snapshot);
+      json(response, 200, snapshot);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/broadcast/replay") {
+      const configuration = await readBroadcastConfiguration(this.rootDirectory);
+      const library = await discoverBroadcastMedia(this.rootDirectory, configuration.manualFiles);
+      const selected = selectedBroadcastMedia(configuration, library);
+      const item = selected.find((entry) => entry.id === url.searchParams.get("id"));
+      if (!item) throw new HttpError(404, "Replay media is not in the active playlist");
+      this.#startReplay(response, item);
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/events") {
       response.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -338,6 +470,7 @@ export class ControlPlane {
         Connection: "keep-alive",
       });
       response.write(`event: state\ndata: ${JSON.stringify(this.#snapshot)}\n\n`);
+      response.write(`event: broadcast\ndata: ${JSON.stringify(await this.#broadcastSnapshot(false))}\n\n`);
       this.#clients.add(response);
       request.on("close", () => this.#clients.delete(response));
       return;
@@ -622,19 +755,24 @@ export class ControlPlane {
 
     const staticFiles: Record<string, { name: string; type: string }> = {
       "/": { name: "index.html", type: "text/html; charset=utf-8" },
+      "/control": { name: "index.html", type: "text/html; charset=utf-8" },
+      "/control/": { name: "index.html", type: "text/html; charset=utf-8" },
+      "/live": { name: "index.html", type: "text/html; charset=utf-8" },
+      "/live/": { name: "index.html", type: "text/html; charset=utf-8" },
       "/index.html": { name: "index.html", type: "text/html; charset=utf-8" },
       "/app.js": { name: "app.js", type: "text/javascript; charset=utf-8" },
       "/styles.css": { name: "styles.css", type: "text/css; charset=utf-8" },
     };
     const file = staticFiles[url.pathname];
-    if (request.method === "GET" && file) {
+    if ((request.method === "GET" || request.method === "HEAD") && file) {
       const body = await readFile(path.join(webRoot, file.name));
       response.writeHead(200, {
         "Content-Type": file.type,
-        "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; connect-src 'self'; script-src 'self'; style-src 'self'",
+        "Content-Length": body.byteLength,
+        "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'",
         "Cache-Control": "no-cache",
       });
-      response.end(body);
+      response.end(request.method === "HEAD" ? undefined : body);
       return;
     }
     throw new HttpError(404, "not found");
@@ -716,23 +854,29 @@ export class ControlPlane {
     });
   }
 
-  #startRunnerLivePreview(response: ServerResponse, port: number): void {
+  #startRunnerProxy(
+    response: ServerResponse,
+    port: number,
+    pathname: string,
+    fallbackContentType: string,
+    label: string,
+  ): void {
     const upstream = httpGet(
-      `http://127.0.0.1:${port}/api/live.mjpeg`,
+      `http://127.0.0.1:${port}${pathname}`,
       (source) => {
         if ((source.statusCode ?? 500) >= 400) {
           source.resume();
           this.#liveProxies.delete(response);
           if (!response.headersSent) {
             json(response, source.statusCode ?? 502, {
-              error: "The private game live stream is unavailable",
+              error: `The ${label} is unavailable`,
             });
           }
           return;
         }
         response.writeHead(200, {
           "Content-Type": source.headers["content-type"] ??
-            "multipart/x-mixed-replace; boundary=ffmpeg",
+            fallbackContentType,
           "Cache-Control": "no-store, no-cache, must-revalidate",
           Pragma: "no-cache",
           Connection: "close",
@@ -754,10 +898,85 @@ export class ControlPlane {
     upstream.once("error", (error) => {
       finish();
       if (!response.headersSent) {
-        json(response, 502, { error: `Live preview failed: ${error.message}` });
+        json(response, 502, { error: `${label} failed: ${error.message}` });
       } else if (!response.writableEnded) {
         response.end();
       }
+    });
+  }
+
+  async #broadcastSnapshot(includeLibrary: boolean): Promise<BroadcastSnapshot> {
+    const configuration = await readBroadcastConfiguration(this.rootDirectory);
+    const library = await discoverBroadcastMedia(this.rootDirectory, configuration.manualFiles);
+    const selected = selectedBroadcastMedia(configuration, library);
+    const phase = this.#checkpoint && !isTerminal(this.#checkpoint.phase)
+      ? this.#checkpoint.phase
+      : null;
+    const liveAvailable = phase === "running" && hasLiveRunner(this.#checkpoint);
+    const playback = determineBroadcastPlayback({
+      configuration,
+      phase,
+      liveAvailable,
+      hasReplay: selected.length > 0,
+    });
+    return {
+      configuration: publicBroadcastConfiguration(configuration, library),
+      ...(includeLibrary ? { library: library.map(publicBroadcastMedia) } : {}),
+      selected: selected.map(publicBroadcastMedia),
+      playback: {
+        ...playback,
+        phase,
+        liveAvailable,
+        retryAt: phase === "waiting_quota" ? this.#checkpoint?.retryAt ?? null : null,
+      },
+      liveUrl: `http://${this.host}:${this.#serverPort()}/live`,
+      resolution: { width: 1920, height: 1080 },
+    };
+  }
+
+  #serverPort(): number {
+    const address = this.#server?.address();
+    return typeof address === "object" && address ? address.port : this.port;
+  }
+
+  #startReplay(response: ServerResponse, item: BroadcastMediaItem): void {
+    const process = spawn("ffmpeg", replayFfmpegArguments(item.filename), {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    this.#replayStreams.set(response, process);
+    response.writeHead(200, {
+      "Content-Type": "video/mp4",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache",
+      Connection: "close",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.flushHeaders();
+    process.stdout?.pipe(response);
+    let stderr = "";
+    process.stderr?.on("data", (chunk: Buffer) => {
+      if (stderr.length < 8_192) stderr += chunk.toString("utf8");
+    });
+    const finish = () => {
+      if (this.#replayStreams.get(response) !== process) return;
+      this.#replayStreams.delete(response);
+      process.stdout?.unpipe(response);
+      if (!response.writableEnded) response.end();
+    };
+    response.once("close", () => {
+      stopLivePreview(process);
+      finish();
+    });
+    process.once("error", finish);
+    process.once("exit", (code) => {
+      if (code !== 0 && stderr.trim()) {
+        this.#broadcast("supervisor", {
+          type: "supervisor.warning",
+          message: `Replay ${item.name} stopped: ${stderr.trim().slice(-1_000)}`,
+        });
+      }
+      finish();
     });
   }
 
@@ -786,11 +1005,18 @@ export class ControlPlane {
 
 function stopLivePreview(child: ChildProcess): void {
   if (child.exitCode !== null || !child.pid) return;
+  const pid = child.pid;
   try {
-    process.kill(-child.pid, "SIGTERM");
+    process.kill(-pid, "SIGTERM");
   } catch {
     // The preview process already exited.
   }
+  const forced = setTimeout(() => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    try { process.kill(-pid, "SIGKILL"); } catch { /* already exited */ }
+  }, 1_000);
+  forced.unref();
+  child.once("exit", () => clearTimeout(forced));
 }
 
 async function loadOptions() {
@@ -1405,6 +1631,88 @@ function parseMutableConfiguration(
 function strictBoolean(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") throw new HttpError(400, `${field} must be boolean`);
   return value;
+}
+
+function publicBroadcastMedia(item: BroadcastMediaItem): PublicBroadcastMediaItem {
+  return {
+    id: item.id,
+    name: item.name,
+    displayPath: item.displayPath,
+    source: item.source,
+    bytes: item.bytes,
+    modifiedAt: item.modifiedAt,
+  };
+}
+
+function publicBroadcastConfiguration(
+  configuration: BroadcastConfiguration,
+  library: readonly BroadcastMediaItem[],
+): BroadcastSnapshot["configuration"] {
+  const idByFilename = new Map(library.map((item) => [item.filename, item.id]));
+  const { manualFiles, playlist, ...publicFields } = configuration;
+  return {
+    ...publicFields,
+    playlist: playlist.flatMap((filename) => {
+      const id = idByFilename.get(filename);
+      return id ? [id] : [];
+    }),
+    manualFileCount: manualFiles.length,
+  };
+}
+
+function broadcastConfigurationPatch(
+  current: BroadcastConfiguration,
+  body: Record<string, unknown>,
+  library: readonly BroadcastMediaItem[],
+): BroadcastConfiguration {
+  const patch: Partial<BroadcastConfiguration> = {};
+  if ("mode" in body) {
+    const mode = String(body.mode);
+    if (!(["auto", "live", "replay"] as string[]).includes(mode)) {
+      throw new HttpError(400, "Broadcast mode must be auto, live, or replay");
+    }
+    patch.mode = mode as BroadcastConfiguration["mode"];
+  }
+  const booleanFields = [
+    "loop",
+    "replayWhenIdle",
+    "replayWhenQuota",
+    "replayWhenPaused",
+    "replayWhenPower",
+    "replayWhenRetry",
+    "showReplayBadge",
+    "showResetTime",
+    "audioEnabled",
+  ] as const;
+  for (const field of booleanFields) {
+    if (field in body) patch[field] = strictBoolean(body[field], field);
+  }
+  if ("replayBadgeText" in body) {
+    const text = String(body.replayBadgeText ?? "").trim();
+    if (!text || text.length > 80) {
+      throw new HttpError(400, "Replay badge text must contain 1 to 80 characters");
+    }
+    patch.replayBadgeText = text;
+  }
+  if ("volume" in body) {
+    const volume = Number(body.volume);
+    if (!Number.isFinite(volume) || volume < 0 || volume > 1) {
+      throw new HttpError(400, "Broadcast volume must be between 0 and 1");
+    }
+    patch.volume = volume;
+  }
+  if ("playlist" in body) {
+    if (!Array.isArray(body.playlist) || body.playlist.length > 500) {
+      throw new HttpError(400, "Broadcast playlist must be an array with at most 500 entries");
+    }
+    const byId = new Map(library.map((item) => [item.id, item.filename]));
+    patch.playlist = [...new Set(body.playlist.map((entry) => {
+      const filename = byId.get(String(entry));
+      if (!filename) throw new HttpError(400, `Unknown replay media id: ${String(entry)}`);
+      return filename;
+    }))];
+  }
+  return { ...current, ...patch };
 }
 
 function parseLaunchMode(

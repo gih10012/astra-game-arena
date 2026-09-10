@@ -40,6 +40,7 @@ test("serves public metrics and protects game controls", async (context) => {
     await fetch(`${url}/api/supervisor`).then((response) => response.json()),
     { version: 1 },
   );
+  assert.equal((await fetch(`${url}/api/live-audio.ogg`)).status, 409);
   assert.deepEqual(
     await fetch(`${url}/api/supervisor`).then((response) => response.json()),
     { version: 2 },

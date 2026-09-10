@@ -11,6 +11,13 @@
 7. Ensure enough free space for long 30 FPS Matroska recording parts and connect stable power/network. The model API needs network. Native search/browser surfaces default to disabled; Shell and other normal Codex capabilities remain enabled, but using any alternate route to retrieve external puzzle information invalidates a declared no-network run.
 8. If live outputs are needed in OBS or a meeting client, load a dedicated `v4l2loopback` device and enable it in the web settings. This exposes both the V4L2 camera and an `Astra Game Microphone` PipeWire source carrying only the private game's audio. It does not require on-disk recording to be enabled.
 
+For OBS specifically, the preferred setup is a single 1920×1080 Browser Source
+pointing to `http://127.0.0.1:4317/live` with **Control audio via OBS** enabled.
+That one page carries the complete director picture and game sound, and can
+visibly switch to the locally configured replay playlist while idle or waiting
+for quota. The replay label and reset time make the source type explicit; see
+[`BROADCAST.md`](BROADCAST.md).
+
 ## During the take
 
 The runner opens the selected native game inside Cage's private headless Xwayland. `wf-recorder` continuously captures the native game output, and FFmpeg combines it with the compact director dashboard from a second private Xvfb display. It opens nothing on niri or any other physical compositor by default. The controller logs a loopback dashboard URL; `--browser` is the explicit opt-in to open it automatically. Do not interact after the timer starts. Infrastructure recovery is allowed only through the recorded watchdog path; human gameplay makes the run invalid.

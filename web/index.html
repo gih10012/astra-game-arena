@@ -22,6 +22,8 @@
             <span id="browser-use-badge" class="badge safe"><i></i> <b id="browser-use-state">BROWSER OFF</b></span>
             <span class="badge"><i id="daemon-dot"></i> SUPERVISOR <b id="daemon-state">ONLINE</b></span>
           </div>
+          <button id="broadcast-button" class="secondary">直播控制</button>
+          <button id="open-live-button" class="secondary">打开 OBS LIVE</button>
           <button id="configure-button" class="secondary">配置挑战</button>
           <button id="pause-button" class="secondary" disabled>暂停</button>
           <button id="resume-button" class="secondary" disabled>继续</button>
@@ -119,8 +121,82 @@
             <div id="account-pool" class="account-pool"></div>
           </div>
           <div class="form-actions">
-            <p><span id="configuration-mode-note"></span><br /><span id="form-message"></span></p>
+            <p>
+              <span id="configuration-mode-note"></span><br />
+              <span id="draft-status"></span>
+              <button id="restore-draft-button" class="text-button" type="button" hidden>恢复本地草稿</button>
+              <button id="clear-draft-button" class="text-button" type="button" hidden>清除草稿</button><br />
+              <span id="form-message"></span>
+            </p>
             <button id="start-button" type="submit" class="primary">从零开始挑战</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="broadcast-configuration" class="configuration broadcast-configuration" hidden>
+        <div class="configuration-head">
+          <div>
+            <span class="eyebrow">OBS BROWSER SOURCE</span>
+            <h2>直播与回放控制</h2>
+          </div>
+          <button id="broadcast-close" class="icon-button" aria-label="关闭">×</button>
+        </div>
+        <form id="broadcast-form">
+          <div class="broadcast-grid">
+            <div class="broadcast-settings">
+              <label class="field">
+                <span>播出模式</span>
+                <select id="broadcast-mode">
+                  <option value="auto">自动：挑战直播，否则按规则回放</option>
+                  <option value="live">强制直播（无运行挑战时待机）</option>
+                  <option value="replay">强制回放</option>
+                </select>
+              </label>
+              <label class="field live-url-field">
+                <span>OBS Browser Source 地址</span>
+                <div class="inline-field">
+                  <input id="live-url" type="text" readonly />
+                  <button id="copy-live-url" type="button">复制</button>
+                  <button id="preview-live" type="button">预览</button>
+                </div>
+                <small>OBS 只需添加这一个网页源：1920×1080；页面同时输出画面和游戏声音。</small>
+              </label>
+              <div class="switch-grid">
+                <label class="record-switch"><input id="replay-idle" type="checkbox" /><span class="switch"></span><span><b>空闲时回放</b><small>没有挑战时播放列表</small></span></label>
+                <label class="record-switch"><input id="replay-quota" type="checkbox" /><span class="switch"></span><span><b>额度等待时回放</b><small>同时显示预计恢复时间</small></span></label>
+                <label class="record-switch"><input id="replay-paused" type="checkbox" /><span class="switch"></span><span><b>人工暂停时回放</b></span></label>
+                <label class="record-switch"><input id="replay-power" type="checkbox" /><span class="switch"></span><span><b>电源等待时回放</b></span></label>
+                <label class="record-switch"><input id="replay-retry" type="checkbox" /><span class="switch"></span><span><b>重试等待时回放</b></span></label>
+                <label class="record-switch"><input id="replay-loop" type="checkbox" /><span class="switch"></span><span><b>循环播放列表</b></span></label>
+                <label class="record-switch"><input id="replay-badge" type="checkbox" /><span class="switch"></span><span><b>显示回放标识</b></span></label>
+                <label class="record-switch"><input id="replay-reset-time" type="checkbox" /><span class="switch"></span><span><b>显示额度恢复时间</b></span></label>
+                <label class="record-switch"><input id="broadcast-audio" type="checkbox" /><span class="switch"></span><span><b>播出游戏声音</b><small>包含在同一个 /live 网页源内</small></span></label>
+              </div>
+              <div class="form-grid broadcast-minor-grid">
+                <label class="field"><span>回放角标文字</span><input id="replay-badge-text" type="text" maxlength="80" /></label>
+                <label class="field"><span>播出音量</span><input id="broadcast-volume" type="range" min="0" max="1" step="0.05" /><small id="broadcast-volume-label">100%</small></label>
+              </div>
+            </div>
+            <div class="broadcast-preview-wrap">
+              <div class="panel-head"><span>LIVE OUTPUT PREVIEW</span><small id="broadcast-playback-state">loading</small></div>
+              <iframe id="live-preview" title="OBS Live preview" loading="lazy"></iframe>
+              <p class="preview-note">预览静音以防监听回声；OBS 页面源仍按上方声音设置输出。</p>
+            </div>
+          </div>
+          <div class="pool-section">
+            <div class="pool-heading">
+              <div><span class="eyebrow">REPLAY PLAYLIST</span><h3>本地录像库</h3></div>
+              <small>勾选并排序要回放的文件；服务器只保存路径，不复制或删除录像。</small>
+            </div>
+            <div class="media-import">
+              <input id="media-path" type="text" placeholder="添加其他本地视频的绝对路径" />
+              <button id="media-import-button" type="button">添加并选中</button>
+            </div>
+            <div id="media-library" class="media-library"></div>
+          </div>
+          <div class="form-actions">
+            <p><span id="broadcast-message">设置保存在本机 .arena/broadcast-config.json</span></p>
+            <button id="broadcast-save" type="submit" class="primary">保存并立即切换播出</button>
           </div>
         </form>
       </section>
@@ -194,6 +270,18 @@
         <span>SHA-256 AUDIT TRAIL</span>
       </footer>
     </div>
+    <section id="broadcast-replay" class="broadcast-replay" hidden>
+      <video id="replay-video" autoplay playsinline></video>
+      <div id="replay-badge-overlay" class="replay-badge-overlay">
+        <strong id="replay-badge-label">录播回放</strong>
+        <span id="replay-clip-name"></span>
+      </div>
+      <div id="quota-reset-overlay" class="quota-reset-overlay" hidden>
+        <span>预计额度恢复</span><strong id="quota-reset-time">—</strong>
+      </div>
+      <div id="broadcast-stream-note" class="broadcast-stream-note" hidden></div>
+    </section>
+    <audio id="live-audio" autoplay></audio>
     <script src="/app.js" defer></script>
   </body>
 </html>

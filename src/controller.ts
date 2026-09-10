@@ -8,6 +8,7 @@ import type { ChallengeState } from "./challenge-state.js";
 import type { GameAdapter, GameFrame } from "./types.js";
 import { allowedKeys, type AllowedKey } from "./types.js";
 import { virtualCameraGameRecorderArguments } from "./virtual-camera.js";
+import { liveAudioFfmpegArguments } from "./broadcast.js";
 
 const publicRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -26,6 +27,7 @@ interface ControllerOptions {
     output: string;
     environment: NodeJS.ProcessEnv;
   };
+  liveAudioSource?: string;
   onTranscript?: (record: TranscriptRecord) => void | Promise<void>;
   onGameAction?: (phase: "before" | "after") => void | Promise<void>;
   supervisorProvider?: () => unknown | Promise<unknown>;
@@ -65,6 +67,8 @@ export class ArenaController {
   #supervisorProvider: ControllerOptions["supervisorProvider"];
   #transcriptWrites: Promise<void> = Promise.resolve();
   #liveCaptureWayland: ControllerOptions["liveCaptureWayland"];
+  #liveAudioSource: string | undefined;
+  #liveAudioStreams = new Map<ServerResponse, ChildProcess>();
 
   constructor(options: ControllerOptions) {
     this.state = options.state;
@@ -78,6 +82,7 @@ export class ArenaController {
     this.#onGameAction = options.onGameAction;
     this.#supervisorProvider = options.supervisorProvider;
     this.#liveCaptureWayland = options.liveCaptureWayland;
+    this.#liveAudioSource = options.liveAudioSource;
     this.#frame = options.initialFrame ?? null;
     this.state.on("change", (snapshot) => {
       this.broadcast("state", snapshot);
@@ -124,6 +129,11 @@ export class ArenaController {
     this.#liveSubscribers.clear();
     if (producer) await this.#stopLiveProducer(producer);
     if (this.#liveProducerStop) await this.#liveProducerStop;
+    for (const [client, process] of this.#liveAudioStreams) {
+      signalChildGroup(process, "SIGTERM");
+      client.end();
+    }
+    this.#liveAudioStreams.clear();
     await this.#transcriptWrites;
     if (!this.#server) return;
     const server = this.#server;
@@ -220,6 +230,13 @@ export class ArenaController {
         throw Object.assign(new Error("Live game capture is unavailable"), { statusCode: 409 });
       }
       await this.#startLiveStream(response);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/live-audio.ogg") {
+      if (!this.#liveAudioSource) {
+        throw Object.assign(new Error("Live game audio is unavailable"), { statusCode: 409 });
+      }
+      this.#startLiveAudio(response);
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/events") {
@@ -384,6 +401,35 @@ export class ArenaController {
       this.#removeLiveSubscriber(response, producer);
       if (!response.writableEnded) response.end();
     }
+  }
+
+  #startLiveAudio(response: ServerResponse): void {
+    const process = spawn("ffmpeg", liveAudioFfmpegArguments(this.#liveAudioSource!), {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    this.#liveAudioStreams.set(response, process);
+    response.writeHead(200, {
+      "Content-Type": "audio/ogg; codecs=opus",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache",
+      Connection: "close",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.flushHeaders();
+    process.stdout?.pipe(response);
+    const finish = () => {
+      if (this.#liveAudioStreams.get(response) !== process) return;
+      this.#liveAudioStreams.delete(response);
+      process.stdout?.unpipe(response);
+      if (!response.writableEnded) response.end();
+    };
+    response.once("close", () => {
+      signalChildGroup(process, "SIGTERM");
+      finish();
+    });
+    process.once("error", finish);
+    process.once("exit", finish);
   }
 
   async #ensureLiveProducer(): Promise<LiveStreamProducer> {

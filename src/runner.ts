@@ -1418,6 +1418,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
       state,
       game: activeGame,
       liveCaptureWayland: virtualGame.captureWayland,
+      liveAudioSource: `${privateAudio.sinkName}.monitor`,
       port: prior.options.port,
       webRoot: path.join(rootDirectory, "web"),
       onTranscript: async (record) => {

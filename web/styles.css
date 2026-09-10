@@ -88,11 +88,11 @@ button.danger { color: #ffabb5; border-color: #71313b; }
 .field { display: grid; align-content: start; gap: 6px; min-width: 0; color: #b9c8cb; font-size: 11px; }
 .field > span, .record-switch b { font-weight: 650; }
 .field small, .record-switch small, .pool-heading small { display: block; color: var(--muted); font-size: 9px; line-height: 1.45; }
-select, textarea, input[type="number"] {
+select, textarea, input[type="number"], input[type="text"] {
   width: 100%; border: 1px solid var(--line); border-radius: 3px;
   background: #0c1518; color: var(--ink); padding: 9px 10px; outline: 0;
 }
-select:focus, textarea:focus, input[type="number"]:focus { border-color: var(--teal); }
+select:focus, textarea:focus, input[type="number"]:focus, input[type="text"]:focus { border-color: var(--teal); }
 .goal-field { grid-column: 1 / span 2; }
 textarea { resize: vertical; min-height: 78px; line-height: 1.5; }
 .record-switch {
@@ -112,6 +112,29 @@ textarea { resize: vertical; min-height: 78px; line-height: 1.5; }
 .quota-field input { padding: 6px; text-align: right; }
 .account-enabled { accent-color: var(--teal); width: 16px; height: 16px; }
 .form-actions { margin-top: 16px; }.form-actions p { margin: 0; color: var(--danger); font-size: 11px; }
+.text-button { border: 0; padding: 2px 5px; background: transparent; color: var(--teal); font-size: 10px; }
+
+.broadcast-configuration { inset: 34px 18px auto; max-height: calc(100vh - 68px); }
+.broadcast-grid { display: grid; grid-template-columns: minmax(540px, 1.35fr) minmax(420px, 1fr); gap: 16px; margin-top: 18px; }
+.broadcast-settings { display: grid; gap: 12px; }
+.inline-field { display: grid; grid-template-columns: 1fr auto auto; gap: 7px; }
+.switch-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 7px; }
+.switch-grid .record-switch { min-height: 58px; }
+.broadcast-minor-grid { grid-template-columns: 1fr 1fr; margin-top: 0; }
+input[type="range"] { width: 100%; accent-color: var(--teal); }
+.broadcast-preview-wrap { min-width: 0; border: 1px solid var(--line); background: #020405; align-self: start; }
+.broadcast-preview-wrap iframe { display: block; width: 100%; aspect-ratio: 16 / 9; border: 0; background: #000; }
+.preview-note { margin: 7px 10px; color: var(--muted); font-size: 9px; }
+.media-import { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin: 10px 0; }
+.media-library { display: grid; gap: 6px; max-height: 260px; overflow: auto; }
+.media-row { display: grid; grid-template-columns: 26px minmax(180px, 1fr) auto auto auto minmax(0, auto); align-items: center; gap: 8px; border: 1px solid #1f3035; background: #0c1417; padding: 7px 9px; }
+.media-row.selected { border-color: #2a665a; }
+.media-row input { accent-color: var(--teal); }
+.media-name { min-width: 0; }
+.media-name b, .media-name small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.media-name small { color: var(--muted); font-size: 8px; }
+.media-meta { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.media-row button { padding: 4px 7px; }
 
 .metrics { display: grid; grid-template-columns: 1.05fr 1fr 1.35fr 1fr; background: color-mix(in srgb, var(--panel) 90%, transparent); border: 1px solid var(--line); }
 .metrics article { min-width: 0; padding: 10px 15px; border-right: 1px solid var(--line); }
@@ -174,10 +197,34 @@ body.compact.director .metrics article:nth-child(4) { display: block; }
 body.compact.director .badges .badge:last-child { display: inline-block; }
 body.compact.director footer { display: flex; }
 
+/* /live is the exact program feed added to OBS as one Browser Source. */
+body.broadcast { width: 1920px; height: 1080px; min-width: 1920px; min-height: 1080px; background: #070d0f; }
+body.broadcast .shell { position: relative; z-index: 1; }
+body.broadcast #live-audio { display: none; }
+.broadcast-replay {
+  position: fixed; z-index: 100; inset: 0; width: 1920px; height: 1080px;
+  overflow: hidden; background: #000;
+}
+.broadcast-replay[hidden] { display: none; }
+.broadcast-replay video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+.replay-badge-overlay, .quota-reset-overlay, .broadcast-stream-note {
+  position: absolute; z-index: 2; border: 1px solid #3f6963;
+  background: rgba(5, 14, 16, .9); box-shadow: 0 8px 30px #0008;
+  font-family: "Noto Sans Mono CJK SC", "Noto Sans Mono", monospace;
+}
+.replay-badge-overlay { top: 30px; left: 30px; display: grid; gap: 4px; padding: 12px 16px; }
+.replay-badge-overlay strong { color: var(--amber); font-size: 19px; letter-spacing: .12em; }
+.replay-badge-overlay span { max-width: 620px; overflow: hidden; color: #b7c6c9; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.quota-reset-overlay { top: 30px; right: 30px; padding: 12px 16px; text-align: right; }
+.quota-reset-overlay span { display: block; color: var(--muted); font-size: 10px; letter-spacing: .12em; }
+.quota-reset-overlay strong { display: block; margin-top: 4px; color: var(--teal); font-size: 19px; }
+.broadcast-stream-note { bottom: 30px; left: 50%; transform: translateX(-50%); padding: 9px 14px; color: var(--danger); font-size: 11px; }
+
 @media (max-width: 900px) {
   .badges { display: none; }.top-actions button { padding: 6px 8px; }
   .metrics { grid-template-columns: 1fr 1fr; }.metrics article:nth-child(n+3) { border-top: 1px solid var(--line); }
   main { grid-template-columns: 1fr; }.game-panel { min-height: 44vh; }
   .session-panel { min-height: 35vh; }.runtime-strip { grid-template-columns: 1fr 1fr; }.runtime-strip div { border-bottom: 1px solid var(--line); }
   .form-grid { grid-template-columns: 1fr 1fr; }.goal-field { grid-column: 1 / -1; }.account-row { grid-template-columns: 28px 1fr; }.quota-field { grid-column: 2; }
+  .broadcast-grid { grid-template-columns: 1fr; }.switch-grid { grid-template-columns: 1fr 1fr; }
 }

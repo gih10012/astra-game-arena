@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -52,9 +52,22 @@ test("serves the durable control page with every pre-run setting", async (contex
     "pause-button",
     "resume-button",
     "end-button",
+    "broadcast-button",
+    "broadcast-configuration",
+    "media-library",
+    "broadcast-audio",
+    "broadcast-replay",
+    "live-audio",
   ]) {
     assert.match(html, new RegExp(`id=["']${id}["']`));
   }
+  assert.equal((await fetch(`${url}/control`)).status, 200);
+  assert.equal((await fetch(`${url}/live`)).status, 200);
+  assert.equal((await fetch(`${url}/live`, { method: "HEAD" })).status, 200);
+  const broadcast = await fetch(`${url}/api/broadcast`).then((response) => response.json());
+  assert.equal(broadcast.playback.mode, "standby");
+  assert.equal(broadcast.configuration.mode, "auto");
+  assert.equal(broadcast.liveUrl, `${url}/live`);
 
   const status = await fetch(`${url}/api/status`).then((response) => response.json());
   assert.equal(status.service.name, "astra-game-arena");
@@ -70,6 +83,8 @@ test("serves the durable control page with every pre-run setting", async (contex
   assert.equal(status.earliestResetAt, null);
   assert.equal(status.virtualCamera.enabled, false);
   assert.equal(status.virtualMicrophone.enabled, false);
+  assert.equal(status.broadcast.configuration.mode, "auto");
+  assert.equal(status.broadcast.playback.mode, "standby");
   assert.deepEqual(status.continuity, {
     mode: "retained-live-process",
     runtimeRetained: false,
@@ -420,6 +435,7 @@ test("routes waiting live runners through request acknowledgements and reports a
 
 test("proxies the live runner stream without requiring a virtual camera", async (context) => {
   let liveRequests = 0;
+  let audioRequests = 0;
   const runner = createServer((request, response) => {
     if (request.url === "/api/live.mjpeg") {
       liveRequests += 1;
@@ -427,6 +443,12 @@ test("proxies the live runner stream without requiring a virtual camera", async 
         "Content-Type": "multipart/x-mixed-replace; boundary=runner",
       });
       response.end("--runner\r\nContent-Type: image/jpeg\r\n\r\nFRAME\r\n--runner--\r\n");
+      return;
+    }
+    if (request.url === "/api/live-audio.ogg") {
+      audioRequests += 1;
+      response.writeHead(200, { "Content-Type": "audio/ogg; codecs=opus" });
+      response.end("OGG-AUDIO");
       return;
     }
     response.writeHead(204);
@@ -474,6 +496,11 @@ test("proxies the live runner stream without requiring a virtual camera", async 
   );
   assert.match(await preview.text(), /FRAME/);
   assert.equal(liveRequests, 1);
+  const audio = await fetch(`${url}/api/live-audio.ogg`);
+  assert.equal(audio.status, 200);
+  assert.equal(audio.headers.get("content-type"), "audio/ogg; codecs=opus");
+  assert.equal(await audio.text(), "OGG-AUDIO");
+  assert.equal(audioRequests, 1);
 
   await (await CheckpointStore.load(runDirectory)).update({
     pid: null,
@@ -482,6 +509,69 @@ test("proxies the live runner stream without requiring a virtual camera", async 
   await control.refresh();
   const unavailable = await fetch(`${url}/api/live.mjpeg`);
   assert.equal(unavailable.status, 409);
+  assert.equal((await fetch(`${url}/api/live-audio.ogg`)).status, 409);
+});
+
+test("persists the OBS replay playlist through the control plane", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "game-arena-broadcast-api-"));
+  const mediaDirectory = path.join(root, ".arena", "broadcast-media");
+  await mkdir(mediaDirectory, { recursive: true });
+  await writeFile(path.join(mediaDirectory, "one.mp4"), "video");
+  const control = new ControlPlane(root, { port: 0 });
+  const url = await control.listen();
+  context.after(() => control.close());
+  const initial = await fetch(`${url}/api/broadcast`).then((response) => response.json());
+  assert.equal(initial.library.length, 1);
+  const id = initial.library[0].id;
+  const saved = await fetch(`${url}/api/broadcast`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "replay", playlist: [id], volume: 0.5 }),
+  }).then((response) => response.json());
+  assert.deepEqual(saved.configuration.playlist, [id]);
+  assert.equal(saved.playback.mode, "replay");
+  assert.equal(saved.configuration.volume, 0.5);
+  const rejected = await fetch(`${url}/api/broadcast`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ playlist: ["unknown"] }),
+  });
+  assert.equal(rejected.status, 400);
+  const manualRoot = await mkdtemp(path.join(os.tmpdir(), "game-arena-manual-api-"));
+  const manualFile = path.join(manualRoot, "manual.webm");
+  await writeFile(manualFile, "manual-video");
+  const imported = await fetch(`${url}/api/broadcast/media`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: manualFile, select: true }),
+  }).then((response) => response.json());
+  const manual = imported.library.find((item: { source: string }) => item.source === "manual");
+  assert.ok(manual);
+  const forgotten = await fetch(`${url}/api/broadcast/media?id=${manual.id}`, {
+    method: "DELETE",
+  }).then((response) => response.json());
+  assert.equal(forgotten.library.some((item: { id: string }) => item.id === manual.id), false);
+  assert.equal(forgotten.configuration.manualFileCount, 0);
+  assert.equal(await readFile(manualFile, "utf8"), "manual-video");
+  await fetch(`${url}/api/broadcast`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "auto" }),
+  });
+  const runDirectory = path.join(root, "runs", "quota-broadcast-run");
+  const retryAt = new Date(Date.now() + 60_000).toISOString();
+  const checkpoint = testCheckpoint(root, runDirectory, {
+    phase: "waiting_quota",
+    retryAt,
+    reason: "Quota exhausted",
+  });
+  await new CheckpointStore(checkpointPath(runDirectory), checkpoint).update({});
+  await registerActiveRun(root, runDirectory);
+  await control.refresh();
+  const quotaReplay = await fetch(`${url}/api/broadcast`).then((response) => response.json());
+  assert.equal(quotaReplay.playback.mode, "replay");
+  assert.equal(quotaReplay.playback.reason, "waiting_quota");
+  assert.equal(quotaReplay.playback.retryAt, retryAt);
 });
 
 test("serializes concurrent checkpoint configuration updates", async (context) => {

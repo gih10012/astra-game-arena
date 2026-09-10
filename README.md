@@ -21,7 +21,7 @@ Game save (referee only) ──────────────────�
 Cage screencopy + dashboard Xvfb ── FFmpeg → continuous CFR parts
 ```
 
-The browser is a read-only control/monitoring plane, never a game reimplementation. It lets the operator configure a run and view the unmodified native game beside an exact Codex transcript. It is always served on loopback by the watchdog; no physical browser is opened by default.
+The browser is a read-only control/monitoring plane, never a game reimplementation. It lets the operator configure a run and view the unmodified native game beside an exact Codex transcript. It is always served on loopback by the watchdog; no physical browser is opened by default. Use `http://127.0.0.1:4317/control` for configuration and `http://127.0.0.1:4317/live` as the complete 1920×1080 OBS Browser Source.
 
 ## Formal layout sample
 
@@ -194,9 +194,39 @@ The loopback director server exposes:
 - `GET /api/challenge/time` — official monotonic elapsed time
 - `GET /api/challenge/tokens` — cumulative input, cached input, output, reasoning output, and total tokens
 - `GET /api/challenge` — dashboard snapshot, including referee-only visible progress
-- `GET /api/status` — complete active configuration, current account five-hour/weekly used and remaining percentages, every account's sanitized telemetry, the earliest pool reset, recording state, virtual-camera/microphone state, and explicit retained/frozen/cold-relaunch continuity state
+- `GET /api/status` — complete active and broadcast configuration, current account five-hour/weekly used and remaining percentages, every account's sanitized telemetry, the earliest pool reset, recording state, virtual-camera/microphone state, and explicit retained/frozen/cold-relaunch continuity state
 - `PATCH /api/configuration` — hot-update the active goal and agent/media/account settings; Web Search and Browser Use are separate booleans
 - `GET /api/events` — Server-Sent Events for state and transcript updates
+- `GET /api/broadcast` — persisted OBS mode, replay rules, media library, playlist, audio setting, and the current live/replay decision
+- `PATCH /api/broadcast` — atomically save broadcast mode, rules, playlist order, badge, and volume without pausing a challenge
+- `POST /api/broadcast/media` — add an existing local video path to the replay library without copying or deleting it
+- `DELETE /api/broadcast/media?id=…` — forget a manually added path without deleting the underlying video
+- `GET /api/broadcast/replay?id=…` — real-time browser-compatible H.264/AAC replay stream for a selected playlist item
+
+## One-source OBS live page
+
+Add one OBS **Browser Source** with URL `http://127.0.0.1:4317/live`, width
+`1920`, height `1080`, and enable **Control audio via OBS**. Do not add the
+MJPEG, game microphone, virtual camera, or replay endpoints separately. The
+page itself is the program output and contains all of these transitions:
+
+- while a challenge is running, the exact no-controls director layout and the
+  private game's PipeWire audio are live;
+- while idle or waiting for quota, the configured local playlist is streamed
+  in real time with an unambiguous replay badge;
+- quota replay additionally shows the checkpoint's exact expected reset time
+  and a live countdown; and
+- when no selected replay is available, the director remains in a truthful
+  standby state instead of inventing footage.
+
+Open `http://127.0.0.1:4317/control`, then choose **直播控制** to set automatic,
+forced-live, or forced-replay mode; choose replay triggers; order files; change
+the badge and volume; or preview the exact output with monitoring muted. The
+server persists these settings to ignored local state at
+`.arena/broadcast-config.json`. Challenge form edits are also kept as a browser
+`localStorage` draft until successfully submitted. Dropped browser tabs,
+watchdog restarts, and machine restarts do not lose the saved broadcast
+configuration. See [`docs/BROADCAST.md`](docs/BROADCAST.md) for details.
 
 ## Optional virtual camera and game microphone
 

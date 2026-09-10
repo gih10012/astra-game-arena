@@ -1,6 +1,10 @@
 const byId = (id) => document.getElementById(id);
-const compact = new URLSearchParams(location.search).get("compact") === "1";
-const director = new URLSearchParams(location.search).get("director") === "1";
+const query = new URLSearchParams(location.search);
+const compact = query.get("compact") === "1";
+const director = query.get("director") === "1";
+const broadcast = location.pathname === "/live" || location.pathname === "/live/" || query.get("broadcast") === "1";
+const preview = broadcast && query.get("preview") === "1";
+const DRAFT_KEY = "astra-game-arena.challenge-draft.v1";
 const state = {
   snapshot: null,
   supervisor: null,
@@ -9,11 +13,19 @@ const state = {
   transcriptSequences: new Set(),
   itemRows: new Map(),
   livePreviewDevice: null,
+  broadcast: null,
+  broadcastModeKey: "",
+  broadcastIndex: 0,
+  broadcastFormVersion: "",
+  playlistDraft: [],
+  draftTimer: null,
 };
 
 if (compact) document.body.classList.add("compact");
-if (director) document.body.classList.add("director");
-if (director) byId("frame-time").textContent = "LIVE · 30 FPS";
+if (director || broadcast) document.body.classList.add("director");
+if (broadcast) document.body.classList.add("broadcast");
+if (broadcast) document.title = "Astra Game Arena · OBS Live";
+if (director || broadcast) byId("frame-time").textContent = "LIVE · 30 FPS";
 
 function formatNumber(value) {
   return new Intl.NumberFormat("en-US").format(Number(value || 0));
@@ -52,6 +64,7 @@ function tick() {
     const runningDelta = phase === "running" ? performance.now() - state.localReceivedAt : 0;
     byId("elapsed").textContent = formatElapsed((state.snapshot.time?.elapsedMs || 0) + runningDelta);
   }
+  if (broadcast) updateResetTime();
   requestAnimationFrame(tick);
 }
 
@@ -235,6 +248,7 @@ async function loadOptions() {
   modelSelect.replaceChildren(...state.options.models.map((model) => new Option(model.displayName, model.slug)));
   modelSelect.value = state.options.defaults.model;
   applyConfigurationToForm(state.options.defaults);
+  updateDraftStatus();
 }
 
 function renderVirtualCameras(configuredDevice) {
@@ -356,6 +370,60 @@ function accountPolicies() {
   }));
 }
 
+function challengeFormValue() {
+  return {
+    gameAppId: byId("game-select").value,
+    goal: byId("goal-input").value,
+    gpuPreference: byId("gpu-select").value,
+    launchMode: byId("launch-mode-select").value,
+    model: byId("model-select").value,
+    reasoningEffort: byId("reasoning-select").value,
+    record: byId("record-toggle").checked,
+    virtualCamera: byId("virtual-camera-toggle").checked,
+    virtualCameraDevice: byId("virtual-camera-select").value,
+    webSearchEnabled: byId("web-search-toggle").checked,
+    browserUseEnabled: byId("browser-use-toggle").checked,
+    toolCreationGuidance: byId("tool-guidance-toggle").checked,
+    accountPolicies: accountPolicies(),
+  };
+}
+
+function saveChallengeDraftSoon() {
+  if (!state.options || broadcast || director || compact) return;
+  clearTimeout(state.draftTimer);
+  state.draftTimer = setTimeout(() => {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({
+      version: 1,
+      savedAt: new Date().toISOString(),
+      configuration: challengeFormValue(),
+    }));
+    updateDraftStatus();
+  }, 250);
+}
+
+function readChallengeDraft() {
+  try {
+    const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+    return draft?.version === 1 && draft.configuration ? draft : null;
+  } catch { return null; }
+}
+
+function updateDraftStatus() {
+  const draft = readChallengeDraft();
+  byId("draft-status").textContent = draft
+    ? `本地草稿：${new Date(draft.savedAt).toLocaleString()}`
+    : "本地草稿：无";
+  byId("restore-draft-button").hidden = !draft;
+  byId("clear-draft-button").hidden = !draft;
+}
+
+function clearChallengeDraft() {
+  clearTimeout(state.draftTimer);
+  state.draftTimer = null;
+  localStorage.removeItem(DRAFT_KEY);
+  updateDraftStatus();
+}
+
 async function submitChallenge(event) {
   event.preventDefault();
   const active = activeChallenge();
@@ -388,6 +456,7 @@ async function submitChallenge(event) {
       : deferred.length
       ? `已保存；${deferred.join("、")} 将在下次游戏进程恢复时生效。`
       : active ? "配置已保存并应用。" : "";
+    clearChallengeDraft();
     if (!active) byId("configuration").hidden = true;
     await refreshSupervisor();
   } catch (error) {
@@ -407,6 +476,259 @@ async function postControl(action, body = {}) {
   return await fetch(`/api/control/${action}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   }).then(assertJson);
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024 ** 2) return `${Math.round(value / 1024)} KiB`;
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  return `${(value / 1024 ** 3).toFixed(2)} GiB`;
+}
+
+function renderBroadcastControl(snapshot, force = false) {
+  if (broadcast || director || compact || !snapshot.library) return;
+  const configuration = snapshot.configuration;
+  const formOpen = !byId("broadcast-configuration").hidden;
+  if (!force && formOpen && state.broadcastFormVersion === configuration.updatedAt) return;
+  state.broadcastFormVersion = configuration.updatedAt;
+  state.playlistDraft = [...configuration.playlist];
+  byId("broadcast-mode").value = configuration.mode;
+  byId("replay-idle").checked = configuration.replayWhenIdle;
+  byId("replay-quota").checked = configuration.replayWhenQuota;
+  byId("replay-paused").checked = configuration.replayWhenPaused;
+  byId("replay-power").checked = configuration.replayWhenPower;
+  byId("replay-retry").checked = configuration.replayWhenRetry;
+  byId("replay-loop").checked = configuration.loop;
+  byId("replay-badge").checked = configuration.showReplayBadge;
+  byId("replay-reset-time").checked = configuration.showResetTime;
+  byId("broadcast-audio").checked = configuration.audioEnabled;
+  byId("replay-badge-text").value = configuration.replayBadgeText;
+  byId("broadcast-volume").value = String(configuration.volume);
+  byId("broadcast-volume-label").textContent = `${Math.round(configuration.volume * 100)}%`;
+  byId("live-url").value = snapshot.liveUrl;
+  byId("broadcast-playback-state").textContent =
+    `${snapshot.playback.mode.toUpperCase()} · ${snapshot.playback.reason}`;
+  renderMediaLibrary(snapshot.library);
+}
+
+function renderMediaLibrary(library = state.broadcast?.library || []) {
+  const container = byId("media-library");
+  container.replaceChildren();
+  const byMediaId = new Map(library.map((item) => [item.id, item]));
+  state.playlistDraft = state.playlistDraft.filter((id) => byMediaId.has(id));
+  const selected = state.playlistDraft.flatMap((id) => byMediaId.get(id) ? [byMediaId.get(id)] : []);
+  const selectedIds = new Set(state.playlistDraft);
+  const items = [...selected, ...library.filter((item) => !selectedIds.has(item.id))];
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "尚未发现录像。可将文件放入 .arena/broadcast-media，或在上方添加绝对路径。";
+    container.append(empty);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("div");
+    const index = state.playlistDraft.indexOf(item.id);
+    row.className = `media-row${index >= 0 ? " selected" : ""}`;
+    const enabled = document.createElement("input");
+    enabled.type = "checkbox";
+    enabled.checked = index >= 0;
+    enabled.setAttribute("aria-label", `选择 ${item.name}`);
+    enabled.addEventListener("change", () => {
+      state.playlistDraft = enabled.checked
+        ? [...state.playlistDraft, item.id]
+        : state.playlistDraft.filter((id) => id !== item.id);
+      renderMediaLibrary(library);
+    });
+    const identity = document.createElement("div"); identity.className = "media-name";
+    const name = document.createElement("b"); name.textContent = item.name;
+    const location = document.createElement("small"); location.textContent = item.displayPath;
+    identity.append(name, location);
+    const meta = document.createElement("span"); meta.className = "media-meta";
+    meta.textContent = `${item.source.toUpperCase()} · ${formatBytes(item.bytes)}`;
+    const up = document.createElement("button"); up.type = "button"; up.textContent = "↑";
+    up.disabled = index <= 0;
+    up.addEventListener("click", () => {
+      [state.playlistDraft[index - 1], state.playlistDraft[index]] =
+        [state.playlistDraft[index], state.playlistDraft[index - 1]];
+      renderMediaLibrary(library);
+    });
+    const down = document.createElement("button"); down.type = "button"; down.textContent = "↓";
+    down.disabled = index < 0 || index >= state.playlistDraft.length - 1;
+    down.addEventListener("click", () => {
+      [state.playlistDraft[index], state.playlistDraft[index + 1]] =
+        [state.playlistDraft[index + 1], state.playlistDraft[index]];
+      renderMediaLibrary(library);
+    });
+    const forget = document.createElement(item.source === "manual" ? "button" : "span");
+    if (item.source === "manual") {
+      forget.type = "button"; forget.textContent = "忘记路径";
+      forget.addEventListener("click", async () => {
+        try {
+          const snapshot = await fetch(`/api/broadcast/media?id=${encodeURIComponent(item.id)}`, {
+            method: "DELETE",
+          }).then(assertJson);
+          applyBroadcastSnapshot(snapshot);
+          renderBroadcastControl(snapshot, true);
+          byId("broadcast-message").textContent = "已忘记路径；原视频文件未删除。";
+        } catch (error) { byId("broadcast-message").textContent = error.message; }
+      });
+    }
+    row.append(enabled, identity, meta, up, down, forget);
+    container.append(row);
+  }
+}
+
+async function refreshBroadcast() {
+  try {
+    const snapshot = await fetch("/api/broadcast", { cache: "no-store" }).then(assertJson);
+    applyBroadcastSnapshot(snapshot);
+  } catch (error) {
+    if (broadcast) showBroadcastNote(`播出控制重连中：${error.message}`);
+  }
+}
+
+function applyBroadcastSnapshot(snapshot) {
+  state.broadcast = snapshot;
+  renderBroadcastControl(snapshot);
+  if (!broadcast) return;
+  const configuration = snapshot.configuration;
+  const playback = snapshot.playback;
+  byId("replay-badge-label").textContent = configuration.replayBadgeText;
+  byId("replay-badge-overlay").hidden = !configuration.showReplayBadge;
+  const showReset = configuration.showResetTime && playback.reason === "waiting_quota" && playback.retryAt;
+  byId("quota-reset-overlay").hidden = !showReset;
+  updateResetTime();
+  const modeKey = `${playback.mode}:${snapshot.selected.map((item) => item.id).join(",")}`;
+  applyBroadcastVolume();
+  if (modeKey === state.broadcastModeKey) return;
+  state.broadcastModeKey = modeKey;
+  showBroadcastNote("");
+  if (playback.mode === "replay") startReplay(0);
+  else if (playback.mode === "live") startLiveBroadcast();
+  else stopBroadcastMedia();
+}
+
+function applyBroadcastVolume() {
+  if (!broadcast || !state.broadcast) return;
+  const configuration = state.broadcast.configuration;
+  const muted = preview || !configuration.audioEnabled;
+  for (const media of [byId("replay-video"), byId("live-audio")]) {
+    media.muted = muted;
+    media.volume = configuration.volume;
+  }
+}
+
+function stopBroadcastMedia() {
+  byId("broadcast-replay").hidden = true;
+  const video = byId("replay-video");
+  video.pause(); video.removeAttribute("src"); video.load();
+  const audio = byId("live-audio");
+  audio.pause(); audio.removeAttribute("src"); audio.load();
+  updateLivePreview(null);
+}
+
+function startLiveBroadcast() {
+  byId("broadcast-replay").hidden = true;
+  const video = byId("replay-video");
+  video.pause(); video.removeAttribute("src"); video.load();
+  updateLivePreview({ active: true, device: "private-runtime" });
+  const audio = byId("live-audio");
+  audio.src = `/api/live-audio.ogg?t=${Date.now()}`;
+  applyBroadcastVolume();
+  if (state.broadcast.configuration.audioEnabled && !preview) {
+    audio.play().catch(() => showBroadcastNote("浏览器阻止了自动播放声音；OBS Browser Source 不受此交互限制"));
+  }
+}
+
+function startReplay(index) {
+  const selected = state.broadcast?.selected || [];
+  if (!selected.length) { stopBroadcastMedia(); return; }
+  state.broadcastIndex = Math.min(Math.max(0, index), selected.length - 1);
+  const item = selected[state.broadcastIndex];
+  const audio = byId("live-audio");
+  audio.pause(); audio.removeAttribute("src"); audio.load();
+  updateLivePreview(null);
+  byId("broadcast-replay").hidden = false;
+  byId("replay-clip-name").textContent = item.name;
+  const video = byId("replay-video");
+  video.src = `/api/broadcast/replay?id=${encodeURIComponent(item.id)}&t=${Date.now()}`;
+  applyBroadcastVolume();
+  video.play().catch(() => showBroadcastNote("回放等待自动播放；请检查 OBS Browser Source 的页面权限"));
+}
+
+function advanceReplay() {
+  const selected = state.broadcast?.selected || [];
+  if (state.broadcastIndex + 1 < selected.length) startReplay(state.broadcastIndex + 1);
+  else if (state.broadcast?.configuration.loop && selected.length) startReplay(0);
+}
+
+function showBroadcastNote(message) {
+  const note = byId("broadcast-stream-note");
+  note.textContent = message;
+  note.hidden = !message;
+}
+
+function updateResetTime() {
+  const retryAt = state.broadcast?.playback?.retryAt;
+  if (!retryAt) return;
+  const remaining = Math.max(0, Date.parse(retryAt) - Date.now());
+  const totalSeconds = Math.ceil(remaining / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  byId("quota-reset-time").textContent =
+    `${new Date(retryAt).toLocaleString()} · ${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+async function saveBroadcast(event) {
+  event.preventDefault();
+  byId("broadcast-save").disabled = true;
+  byId("broadcast-message").textContent = "正在保存并切换…";
+  try {
+    const snapshot = await fetch("/api/broadcast", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: byId("broadcast-mode").value,
+        playlist: state.playlistDraft,
+        replayWhenIdle: byId("replay-idle").checked,
+        replayWhenQuota: byId("replay-quota").checked,
+        replayWhenPaused: byId("replay-paused").checked,
+        replayWhenPower: byId("replay-power").checked,
+        replayWhenRetry: byId("replay-retry").checked,
+        loop: byId("replay-loop").checked,
+        showReplayBadge: byId("replay-badge").checked,
+        showResetTime: byId("replay-reset-time").checked,
+        audioEnabled: byId("broadcast-audio").checked,
+        replayBadgeText: byId("replay-badge-text").value,
+        volume: Number(byId("broadcast-volume").value),
+      }),
+    }).then(assertJson);
+    applyBroadcastSnapshot(snapshot);
+    renderBroadcastControl(snapshot, true);
+    byId("broadcast-message").textContent = "已持久化并立即应用到 /live。";
+  } catch (error) {
+    byId("broadcast-message").textContent = error.message;
+  } finally { byId("broadcast-save").disabled = false; }
+}
+
+async function importBroadcastMedia() {
+  const path = byId("media-path").value.trim();
+  if (!path) return;
+  byId("media-import-button").disabled = true;
+  try {
+    const snapshot = await fetch("/api/broadcast/media", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, select: true }),
+    }).then(assertJson);
+    byId("media-path").value = "";
+    applyBroadcastSnapshot(snapshot);
+    renderBroadcastControl(snapshot, true);
+    byId("broadcast-message").textContent = "视频已加入播放列表。";
+  } catch (error) {
+    byId("broadcast-message").textContent = error.message;
+  } finally { byId("media-import-button").disabled = false; }
 }
 
 async function refreshSupervisor() {
@@ -449,10 +771,12 @@ async function refreshSupervisor() {
     byId("virtual-microphone-state").textContent = microphone?.active
       ? `LIVE ${microphone.label || microphone.name}`
       : microphone?.enabled ? `PAUSED ${microphone.label || "Astra Game Microphone"}` : "OFF";
-    const runnerLive = Boolean(state.supervisor.active && checkpoint?.pid);
-    updateLivePreview(runnerLive
-      ? { active: true, device: camera?.active ? camera.device : "private-runtime" }
-      : camera);
+    if (!broadcast) {
+      const runnerLive = Boolean(state.supervisor.active && checkpoint?.pid);
+      updateLivePreview(runnerLive
+        ? { active: true, device: camera?.active ? camera.device : "private-runtime" }
+        : camera);
+    }
     updateControls();
   } catch {
     byId("daemon-state").textContent = "RECONNECTING";
@@ -470,7 +794,7 @@ function quotaText(window, reserve) {
 }
 
 function updateControls() {
-  if (compact) return;
+  if (compact || director || broadcast) return;
   const phase = state.supervisor?.checkpoint?.phase || state.snapshot?.phase || "idle";
   const active = state.supervisor?.active && !["completed", "failed"].includes(phase);
   byId("pause-button").disabled = !active || phase === "paused";
@@ -493,10 +817,12 @@ async function bootstrap() {
   const frameResponse = await fetch("/api/frame");
   if (frameResponse.ok && frameResponse.status !== 204) showFrame("initial");
   if (!compact) {
-    if (!director) await loadOptions();
+    if (!director && !broadcast) await loadOptions();
     await refreshSupervisor();
-    if (!director && !state.supervisor?.active) byId("configuration").hidden = false;
+    await refreshBroadcast();
+    if (!director && !broadcast && !state.supervisor?.active) byId("configuration").hidden = false;
     setInterval(refreshSupervisor, 2_000);
+    setInterval(refreshBroadcast, 2_000);
   }
 }
 
@@ -505,8 +831,9 @@ events.addEventListener("state", (event) => applySnapshot(JSON.parse(event.data)
 events.addEventListener("transcript", (event) => addTranscript(JSON.parse(event.data)));
 events.addEventListener("transcript_reset", (event) => replaceTranscript(JSON.parse(event.data)));
 events.addEventListener("frame", (event) => showFrame(JSON.parse(event.data).sha256));
+events.addEventListener("broadcast", (event) => applyBroadcastSnapshot(JSON.parse(event.data)));
 events.addEventListener("configuration", (event) => {
-  if (director) return;
+  if (director || broadcast) return;
   const result = JSON.parse(event.data);
   if (result.pending) return;
   byId("form-message").textContent = result.error
@@ -525,9 +852,47 @@ byId("game-frame").addEventListener("error", () => {
   showFrame("live-error");
 });
 
-if (!compact && !director) {
+byId("replay-video").addEventListener("ended", advanceReplay);
+byId("replay-video").addEventListener("playing", () => showBroadcastNote(""));
+byId("replay-video").addEventListener("error", () => {
+  if (!broadcast || state.broadcast?.playback?.mode !== "replay") return;
+  showBroadcastNote("回放文件无法解码，正在尝试播放列表下一项");
+  setTimeout(advanceReplay, 1_500);
+});
+byId("live-audio").addEventListener("playing", () => showBroadcastNote(""));
+document.addEventListener("click", () => {
+  if (!broadcast || preview || !state.broadcast?.configuration?.audioEnabled) return;
+  const media = state.broadcast.playback.mode === "live" ? byId("live-audio") : byId("replay-video");
+  media.play().catch(() => undefined);
+}, { passive: true });
+
+if (!compact && !director && !broadcast) {
   byId("configure-button").addEventListener("click", () => { byId("configuration").hidden = false; });
   byId("configuration-close").addEventListener("click", () => { byId("configuration").hidden = true; });
+  byId("broadcast-button").addEventListener("click", async () => {
+    byId("broadcast-configuration").hidden = false;
+    byId("live-preview").src = "/live?preview=1";
+    await refreshBroadcast();
+  });
+  byId("broadcast-close").addEventListener("click", () => { byId("broadcast-configuration").hidden = true; });
+  byId("open-live-button").addEventListener("click", () => window.open("/live", "_blank", "noopener"));
+  byId("preview-live").addEventListener("click", () => window.open("/live?preview=1", "_blank", "noopener"));
+  byId("copy-live-url").addEventListener("click", async () => {
+    await navigator.clipboard.writeText(byId("live-url").value);
+    byId("broadcast-message").textContent = "OBS Live 地址已复制。";
+  });
+  byId("broadcast-form").addEventListener("submit", saveBroadcast);
+  byId("media-import-button").addEventListener("click", importBroadcastMedia);
+  byId("broadcast-volume").addEventListener("input", () => {
+    byId("broadcast-volume-label").textContent = `${Math.round(Number(byId("broadcast-volume").value) * 100)}%`;
+  });
+  byId("challenge-form").addEventListener("input", saveChallengeDraftSoon);
+  byId("challenge-form").addEventListener("change", saveChallengeDraftSoon);
+  byId("restore-draft-button").addEventListener("click", () => {
+    const draft = readChallengeDraft();
+    if (draft) applyConfigurationToForm(draft.configuration);
+  });
+  byId("clear-draft-button").addEventListener("click", clearChallengeDraft);
   byId("game-select").addEventListener("change", updateGameDetail);
   byId("model-select").addEventListener("change", renderReasoningOptions);
   byId("virtual-camera-toggle").addEventListener("change", updateVirtualCameraControls);
