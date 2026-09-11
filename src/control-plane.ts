@@ -524,10 +524,15 @@ export class ControlPlane {
     }
     if (request.method === "GET" && url.pathname === "/api/broadcast/replay.mjpeg") {
       const item = await this.#selectedReplayItem(url.searchParams.get("id"));
+      const accountPool = await accountPoolSnapshot(this.#checkpoint);
+      const publicAccountPool = supervisorAccountPool(this.#checkpoint, accountPool);
+      const credentialLabel = this.#checkpoint
+        ? currentCredentialStatus(this.#checkpoint.credential, publicAccountPool).label
+        : "ChatGPT account";
       this.#startReplayStream(
         response,
         item,
-        replayMjpegFfmpegArguments(item.filename),
+        replayMjpegFfmpegArguments(item.filename, credentialLabel),
         "multipart/x-mixed-replace; boundary=ffmpeg",
         "Replay video",
       );

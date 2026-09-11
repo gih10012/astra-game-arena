@@ -996,9 +996,11 @@ async function refreshSupervisor() {
     const apiKeyActive = credential?.mode === "api-key";
     const accountPolicy = state.supervisor.checkpoint?.options?.accountPolicies
       ?.find((policy) => policy.accountId === pool?.activeAccountId);
-    byId("active-account").textContent = apiKeyActive
+    const accountName = apiKeyActive
       ? credential?.label || "API key"
       : accountPolicy?.displayName || active?.displayName || active?.label || "ChatGPT account";
+    byId("active-account").textContent = accountName;
+    byId("replay-credential-name").textContent = accountName;
     byId("five-hour").textContent = apiKeyActive
       ? `${String(credential.provider || "custom").toUpperCase()} API KEY`
       : quotaText(active?.primary, active?.reserveFiveHourPercent);

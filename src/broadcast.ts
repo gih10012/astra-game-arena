@@ -245,17 +245,36 @@ export function replayFfmpegArguments(filename: string): string[] {
   ];
 }
 
-export function replayMjpegFfmpegArguments(filename: string): string[] {
+export function replayMjpegFfmpegArguments(
+  filename: string,
+  credentialLabel?: string,
+): string[] {
+  const credentialOverlay = credentialLabel
+    ? ",drawbox=x=19:y=1021:w=347:h=31:color=0x0b1316:t=fill," +
+      "drawtext=font='Noto Sans Mono':text='CREDENTIAL':" +
+      "fontcolor=0x596970:fontsize=7:x=30:y=1027:expansion=none," +
+      `drawtext=font='Noto Sans Mono':text='${escapeDrawtext(credentialLabel)}':` +
+      "fontcolor=0xb9c8cb:fontsize=9:x=30:y=1037:expansion=none"
+    : "";
   return [
     "-nostdin", "-hide_banner", "-loglevel", "warning",
     "-re", "-i", filename,
     "-map", "0:v:0", "-an", "-sn", "-dn",
     "-vf",
     "scale=1920:1080:force_original_aspect_ratio=decrease," +
-      "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,fps=30",
+      "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,fps=30" +
+      credentialOverlay,
     "-c:v", "mjpeg", "-q:v", "5",
     "-flush_packets", "1", "-f", "mpjpeg", "pipe:1",
   ];
+}
+
+function escapeDrawtext(value: string): string {
+  return value
+    .replace(/[\r\n\t]+/g, " ")
+    .replaceAll("\\", "\\\\")
+    .replaceAll("'", "\\'")
+    .replaceAll(":", "\\:");
 }
 
 export function replayAudioFfmpegArguments(filename: string): string[] {

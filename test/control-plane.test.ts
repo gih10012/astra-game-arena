@@ -59,6 +59,7 @@ test("serves the durable control page with every pre-run setting", async (contex
     "broadcast-replay",
     "replay-image",
     "replay-audio",
+    "replay-credential-overlay",
     "live-audio",
     "music-audio",
     "music-enabled",
