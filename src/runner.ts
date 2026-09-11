@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import {
   access,
+  cp,
   mkdir,
   readFile,
   readdir,
@@ -146,6 +147,19 @@ export interface RunOutcome {
   reason: string | null;
 }
 
+interface ArchivedContinuationSeed {
+  sourceRunId: string;
+  sourceRunDirectory: string;
+  saveDirectory: string;
+  workspaceDirectory: string;
+  threadId: string | null;
+  elapsedMs: number;
+  startedAt: string | null;
+  tokens: RunCheckpoint["tokens"];
+  tokenCursor: RunCheckpoint["tokenCursor"];
+  progress: RunCheckpoint["progress"];
+}
+
 type RequestedAttemptStop = "pause" | "restart" | "game-exit";
 
 export async function runChallenge(options: RunOptions): Promise<RunOutcome> {
@@ -164,9 +178,61 @@ export async function queueChallenge(options: RunOptions): Promise<RunOutcome> {
   };
 }
 
+export async function queueArchivedContinuation(
+  sourceRunDirectory: string,
+  options: RunOptions,
+): Promise<RunOutcome> {
+  const sourceStore = await CheckpointStore.load(sourceRunDirectory);
+  const source = sourceStore.snapshot();
+  if (source.phase !== "completed" && source.phase !== "failed") {
+    throw new Error(`Archived source run must be terminal: ${source.runDirectory}`);
+  }
+  const sourceGame = source.options.game ?? await findInstalledSteamGame("1260520");
+  if (sourceGame.appId !== "1260520") {
+    throw new Error("Archived save continuation is currently supported only for Patrick's Parabox");
+  }
+  const saveDirectory = await archivedSaveDirectory(source.runDirectory);
+  if (!saveDirectory) {
+    throw new Error(`Archived challenge save is unavailable: ${source.runDirectory}`);
+  }
+  const continuationCodexHome = options.codexHome ?? source.options.codexHome;
+  const checkpoint = await initializeChallenge(
+    {
+      ...options,
+      gameAppId: sourceGame.appId,
+      model: options.model ?? source.options.model ?? "gpt-6-astra",
+      goal: options.goal ?? source.options.goal ?? DEFAULT_GOAL,
+      reasoningEffort: options.reasoningEffort ?? source.options.reasoningEffort,
+      isolateSaves: true,
+      ...(continuationCodexHome ? { codexHome: continuationCodexHome } : {}),
+    },
+    true,
+    {
+      sourceRunId: source.runId,
+      sourceRunDirectory: source.runDirectory,
+      saveDirectory,
+      workspaceDirectory: path.join(source.runDirectory, "workspace"),
+      threadId: source.threadId,
+      elapsedMs: source.elapsedMs,
+      startedAt: source.startedAt,
+      tokens: source.tokens,
+      tokenCursor: source.tokenCursor,
+      progress: source.progress,
+    },
+  );
+  const queued = checkpoint.snapshot();
+  return {
+    runDirectory: queued.runDirectory,
+    phase: queued.phase,
+    retryAt: queued.retryAt,
+    reason: queued.reason,
+  };
+}
+
 async function initializeChallenge(
   options: RunOptions,
   queued: boolean,
+  continuation?: ArchivedContinuationSeed,
 ): Promise<CheckpointStore> {
   const runId = createRunId();
   const runDirectory = path.resolve(
@@ -215,15 +281,15 @@ async function initializeChallenge(
     pidStartTicks: queued ? null : processStartTicks(),
     gameRuntimeReady: false,
     gameRuntimeFrozen: false,
-    threadId: null,
+    threadId: continuation?.threadId ?? null,
     retryAt: queued ? now : null,
     reason: queued ? "Queued for the systemd watchdog" : null,
     savePrepared: false,
-    elapsedMs: 0,
-    startedAt: null,
-    tokens: emptyTokenUsage(),
-    tokenCursor: null,
-    progress: { total: 0, unlocked: 0, completed: 0 },
+    elapsedMs: continuation?.elapsedMs ?? 0,
+    startedAt: continuation?.startedAt ?? null,
+    tokens: continuation?.tokens ?? emptyTokenUsage(),
+    tokenCursor: continuation?.tokenCursor ?? null,
+    progress: continuation?.progress ?? { total: 0, unlocked: 0, completed: 0 },
     recordings: [],
     recordingPairs: [],
     credential: CHATGPT_POOL_CREDENTIAL,
@@ -270,6 +336,35 @@ async function initializeChallenge(
     initialCheckpoint,
   );
   await checkpoint.update({});
+  let continuationGuard: SaveGuard | null = null;
+  try {
+    if (continuation) {
+      continuationGuard = new SaveGuard(defaultGamePaths().saveDirectory, runDirectory);
+      await continuationGuard.prepare();
+      await continuationGuard.seedFrom(continuation.saveDirectory);
+      try {
+        await cp(continuation.workspaceDirectory, path.join(runDirectory, "workspace"), {
+          recursive: true,
+          force: false,
+        });
+      } catch (error) {
+        if (!isMissingPath(error)) throw error;
+      }
+      await checkpoint.update({ savePrepared: true });
+      await audit.append("challenge.continued_from_archive", {
+        sourceRunId: continuation.sourceRunId,
+        sourceRunDirectory: continuation.sourceRunDirectory,
+        sourceThreadId: continuation.threadId,
+        sourceProgress: continuation.progress,
+        sourceElapsedMs: continuation.elapsedMs,
+        sourceTotalTokens: continuation.tokens.totalTokens,
+        continuity: "durable-game-save-and-codex-thread",
+      });
+    }
+  } catch (error) {
+    await continuationGuard?.restore().catch(() => undefined);
+    throw error;
+  }
   if (queued) {
     await audit.append("challenge.queued", {
       supervisor: "astra-game-arena-watchdog.service",
@@ -278,6 +373,23 @@ async function initializeChallenge(
   }
   await registerActiveRun(rootDirectory, runDirectory);
   return checkpoint;
+}
+
+async function archivedSaveDirectory(runDirectory: string): Promise<string | null> {
+  for (const name of ["challenge-save", "checkpoint-save"]) {
+    const directory = path.join(runDirectory, name);
+    try {
+      const entries = await readdir(directory);
+      if (entries.some((entry) => /^save\d+\.txt$/i.test(entry))) return directory;
+    } catch {
+      // Try the next durable save location.
+    }
+  }
+  return null;
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 export async function resumeChallenge(runDirectory: string): Promise<RunOutcome> {

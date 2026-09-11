@@ -43,6 +43,28 @@ test("restores a checkpointed challenge after a completed restore cycle", async 
   assert.equal(await readFile(path.join(saves, "save0.txt"), "utf8"), "challenge");
 });
 
+test("seeds an isolated run from an archived challenge save", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "save-seed-"));
+  const saves = path.join(root, "saves");
+  const archived = path.join(root, "archived");
+  const run = path.join(root, "run");
+  await (await import("node:fs/promises")).mkdir(saves, { recursive: true });
+  await (await import("node:fs/promises")).mkdir(archived, { recursive: true });
+  await writeFile(path.join(saves, "save0.txt"), "personal");
+  await writeFile(path.join(archived, "save0.txt"), "challenge");
+  const guard = new SaveGuard(saves, run);
+
+  await guard.prepare();
+  await guard.seedFrom(archived);
+  assert.equal(await readFile(path.join(saves, "save0.txt"), "utf8"), "challenge");
+  await guard.restore();
+  assert.equal(await readFile(path.join(saves, "save0.txt"), "utf8"), "personal");
+  assert.equal(
+    await readFile(path.join(run, "challenge-save/save0.txt"), "utf8"),
+    "challenge",
+  );
+});
+
 test("manual crash recovery archives the live challenge before restoring originals", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "save-recovery-"));
   const saves = path.join(root, "saves");

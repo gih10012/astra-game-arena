@@ -15,6 +15,7 @@ import {
 } from "./recording-assembly.js";
 import {
   cancelChallenge,
+  queueArchivedContinuation,
   queueChallenge,
   resumeChallenge,
   runChallenge,
@@ -139,6 +140,31 @@ if (command === "doctor") {
   const runDirectory = args.find((argument) => !argument.startsWith("--"));
   if (!runDirectory) throw new Error("Usage: game-arena resume <run-directory>");
   printOutcome(await resumeChallenge(path.resolve(runDirectory)));
+} else if (command === "continue-archived") {
+  const sourceRunDirectory = args.find((argument) => !argument.startsWith("--"));
+  if (!sourceRunDirectory) {
+    throw new Error("Usage: game-arena continue-archived <run-directory>");
+  }
+  const operator = await readOperatorDefaults(rootDirectory);
+  const outcome = await queueArchivedContinuation(path.resolve(sourceRunDirectory), {
+    rootDirectory,
+    publicPort: 4317,
+    port: 4318,
+    model: operator.model,
+    gpuPreference: "auto",
+    launchMode: "direct",
+    reasoningEffort: operator.reasoningEffort,
+    record: operator.record,
+    virtualCamera: operator.virtualCamera,
+    virtualCameraDevice: operator.virtualCameraDevice,
+    quotaWaitMs: operator.quotaWaitMs,
+    accountPolicies: operator.accountPolicies,
+    webSearchEnabled: operator.webSearchEnabled,
+    browserUseEnabled: operator.browserUseEnabled,
+    toolCreationGuidance: operator.toolCreationGuidance,
+  });
+  console.log(`Archived challenge queued: ${outcome.runDirectory}`);
+  console.log("Control and monitoring: http://127.0.0.1:4317");
 } else if (command === "cancel") {
   const runDirectory = args.find((argument) => !argument.startsWith("--"));
   if (!runDirectory) throw new Error("Usage: game-arena cancel <run-directory>");
@@ -229,6 +255,7 @@ Usage:
   game-arena smoke-headless
   game-arena run [--game APPID] [--gpu auto|integrated|discrete] [--goal TEXT] [--model MODEL] [--reasoning high] [--quota-wait-hours 5] [--codex-home PATH] [--no-record] [--virtual-camera /dev/video10] [--foreground]
   game-arena resume <run-directory>
+  game-arena continue-archived <run-directory>
   game-arena cancel <run-directory>
   game-arena status
   game-arena assemble [run-directory] [--output PATH]
@@ -237,6 +264,43 @@ Usage:
   game-arena service install|install-assembler|status|uninstall
   game-arena restore <run/save-recovery.json>
 `);
+}
+
+async function readOperatorDefaults(root: string): Promise<{
+  model: string;
+  reasoningEffort: NonNullable<RunOptions["reasoningEffort"]>;
+  record: boolean;
+  virtualCamera: boolean;
+  virtualCameraDevice: string;
+  quotaWaitMs: number;
+  accountPolicies: NonNullable<RunOptions["accountPolicies"]>;
+  webSearchEnabled: boolean;
+  browserUseEnabled: boolean;
+  toolCreationGuidance: boolean;
+}> {
+  const defaults = {
+    model: "gpt-6-astra",
+    reasoningEffort: "high" as const,
+    record: true,
+    virtualCamera: false,
+    virtualCameraDevice: "/dev/video10",
+    quotaWaitMs: 5 * 60 * 60 * 1_000,
+    accountPolicies: [] as NonNullable<RunOptions["accountPolicies"]>,
+    webSearchEnabled: false,
+    browserUseEnabled: false,
+    toolCreationGuidance: true,
+  };
+  try {
+    const value = JSON.parse(
+      await (await import("node:fs/promises")).readFile(
+        path.join(root, ".arena", "operator-config.json"),
+        "utf8",
+      ),
+    ) as Partial<typeof defaults>;
+    return { ...defaults, ...value };
+  } catch {
+    return defaults;
+  }
 }
 
 function numberArg(args: string[], name: string, fallback: number): number {

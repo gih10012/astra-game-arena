@@ -150,6 +150,7 @@ node dist/src/cli.js run --foreground
 node dist/src/cli.js status
 node dist/src/cli.js assemble
 node dist/src/cli.js cancel runs/<run-id>
+node dist/src/cli.js continue-archived runs/<cancelled-run-id>
 node dist/src/cli.js restore runs/<run-id>/save-recovery.json
 ```
 

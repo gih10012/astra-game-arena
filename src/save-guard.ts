@@ -102,6 +102,22 @@ export class SaveGuard {
     await this.#writePlan();
   }
 
+  async seedFrom(sourceDirectory: string): Promise<void> {
+    if (!this.#plan) {
+      throw new Error("Save isolation must be prepared before seeding a challenge save");
+    }
+    const names = await saveNames(sourceDirectory);
+    if (names.length === 0) {
+      throw new Error(`No challenge save files found in ${sourceDirectory}`);
+    }
+    for (const name of names) {
+      await copyAtomic(
+        path.join(sourceDirectory, name),
+        path.join(this.saveDirectory, name),
+      );
+    }
+  }
+
   async checkpointChallenge(): Promise<void> {
     const checkpointDirectory = path.join(this.runDirectory, "checkpoint-save");
     await mkdir(checkpointDirectory, { recursive: true });
