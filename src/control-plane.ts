@@ -337,13 +337,14 @@ export class ControlPlane {
         accountPoolSnapshot(checkpoint),
         checkpoint ? readRuntimeMediaState(checkpoint.runDirectory) : null,
       ]);
+      const publicAccountPool = supervisorAccountPool(checkpoint, accountPool);
       json(response, 200, {
         active: checkpoint !== null,
         checkpoint,
         currentCredential: checkpoint
-          ? currentCredentialStatus(checkpoint.credential, accountPool)
+          ? currentCredentialStatus(checkpoint.credential, publicAccountPool)
           : null,
-        accountPool,
+        accountPool: publicAccountPool,
         recording: recordingStatus(checkpoint, mediaState),
         virtualCamera: virtualCameraStatus(checkpoint, mediaState),
         virtualMicrophone: virtualMicrophoneStatus(checkpoint, mediaState),
@@ -1147,7 +1148,10 @@ async function loadOptions() {
   ]);
   return {
     games: games.map(({ executable: _executable, manifest: _manifest, ...game }) => game),
-    accounts: accounts.map((account) => ({ id: account.id, email: account.email, label: path.basename(account.home) })),
+    accounts: accounts.map((account) => ({
+      id: account.id,
+      displayName: path.basename(account.home) || "ChatGPT account",
+    })),
     models,
     virtualCameras,
   };
@@ -1282,9 +1286,19 @@ function statusSnapshot(options: {
   mediaState: RuntimeMediaState | null;
 }) {
   const checkpoint = options.checkpoint;
-  const accounts = options.accountPool?.accounts.map(publicAccountStatus) ?? [];
+  const names = accountDisplayNames(checkpoint);
+  const accounts = options.accountPool?.accounts.map((account) =>
+    publicAccountStatus(account, names.get(account.id))
+  ) ?? [];
+  const credentialPool = options.accountPool ? {
+    activeAccountId: options.accountPool.activeAccountId,
+    accounts: accounts.map((account) => ({
+      id: account.id,
+      displayName: account.displayName,
+    })),
+  } : null;
   const currentCredential = checkpoint
-    ? currentCredentialStatus(checkpoint.credential, options.accountPool)
+    ? currentCredentialStatus(checkpoint.credential, credentialPool)
     : null;
   const apiKeyActive = currentCredential?.mode === "api-key";
   const activeAccountId = apiKeyActive
@@ -1479,12 +1493,14 @@ function operatorConfigurationFromCheckpoint(
   };
 }
 
-function publicAccountStatus(account: AccountUsageState) {
+function publicAccountStatus(account: AccountUsageState, configuredName?: string) {
   const nowMs = Date.now();
+  const displayName = configuredName || account.displayName ||
+    path.basename(account.home) || "ChatGPT account";
   return {
     id: account.id,
-    email: account.email,
-    label: path.basename(account.home),
+    displayName,
+    label: displayName,
     reserveFiveHourPercent: account.reserveFiveHourPercent,
     reserveWeeklyPercent: account.reserveWeeklyPercent,
     fiveHour: publicRateWindow(account.primary, nowMs),
@@ -1494,6 +1510,32 @@ function publicAccountStatus(account: AccountUsageState) {
         ? isoOrNull(account.blockedUntilMs)
         : null,
     updatedAt: account.updatedAt,
+  };
+}
+
+function accountDisplayNames(checkpoint: RunCheckpoint | null): Map<string, string> {
+  return new Map((checkpoint?.options.accountPolicies ?? []).flatMap((policy) => {
+    const name = policy.displayName?.trim();
+    return name ? [[policy.accountId, name] as const] : [];
+  }));
+}
+
+function supervisorAccountPool(
+  checkpoint: RunCheckpoint | null,
+  accountPool: AccountPoolState | null,
+) {
+  if (!accountPool) return null;
+  const names = accountDisplayNames(checkpoint);
+  return {
+    ...accountPool,
+    accounts: accountPool.accounts.map((account) => {
+      const { email: _email, home: _home, ...status } = account;
+      return {
+        ...status,
+        displayName: names.get(account.id) || account.displayName ||
+          path.basename(account.home) || "ChatGPT account",
+      };
+    }),
   };
 }
 
@@ -1879,17 +1921,31 @@ function parseGpuPreference(value: unknown): "auto" | "integrated" | "discrete" 
 
 function parseAccountPolicies(value: unknown, accounts: unknown[]): AccountPolicy[] {
   if (!Array.isArray(value)) return [];
-  const known = new Set(accounts.flatMap((entry) => {
-    const id = objectValue(entry)?.id;
-    return typeof id === "string" ? [id] : [];
+  const known = new Map(accounts.flatMap((entry) => {
+    const account = objectValue(entry);
+    const id = account?.id;
+    return typeof id === "string" ? [[id, account] as const] : [];
   }));
   const policies = value.map((raw) => {
     const entry = objectValue(raw);
     const accountId = String(entry?.accountId ?? "");
     if (!known.has(accountId)) throw new HttpError(400, "Unknown account in pool policy");
+    const account = known.get(accountId);
+    const fallbackName = String(account?.displayName ?? "ChatGPT account").trim();
+    const requestedName = entry?.displayName;
+    if (requestedName !== undefined && (
+      typeof requestedName !== "string" ||
+      requestedName.trim().length < 1 ||
+      requestedName.trim().length > 80
+    )) {
+      throw new HttpError(400, "Account display names must contain 1 to 80 characters");
+    }
     return {
       accountId,
       enabled: entry?.enabled !== false,
+      displayName: typeof requestedName === "string"
+        ? requestedName.trim()
+        : fallbackName,
       reserveFiveHourPercent: percent(entry?.reserveFiveHourPercent),
       reserveWeeklyPercent: percent(entry?.reserveWeeklyPercent),
     };

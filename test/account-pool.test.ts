@@ -34,9 +34,10 @@ test("rotates accounts at configurable per-account reserve thresholds", async ()
     profile("a", "a@example.test", "/accounts/a"),
     profile("b", "b@example.test", "/accounts/b"),
   ], [
-    { accountId: "a", enabled: true, reserveFiveHourPercent: 50, reserveWeeklyPercent: 10 },
+    { accountId: "a", enabled: true, displayName: "Primary", reserveFiveHourPercent: 50, reserveWeeklyPercent: 10 },
     { accountId: "b", enabled: true, reserveFiveHourPercent: 0, reserveWeeklyPercent: 0 },
   ]);
+  assert.equal(pool.snapshot(now).accounts[0]?.displayName, "Primary");
   assert.equal(pool.choose(now).account?.id, "a");
   await pool.update("a", {
     primary: { usedPercent: 50, resetsAtMs: now + 3_600_000 },

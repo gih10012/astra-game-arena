@@ -18,6 +18,7 @@ export interface RateWindowState {
 }
 
 export interface AccountUsageState extends CodexAccountProfile {
+  displayName: string;
   reserveFiveHourPercent: number;
   reserveWeeklyPercent: number;
   primary: RateWindowState;
@@ -144,6 +145,10 @@ export class AccountPool {
         const policy = configured.get(profile.id);
         return {
           ...profile,
+          displayName: normalizedDisplayName(
+            policy?.displayName ?? old?.displayName,
+            path.basename(profile.home) || "ChatGPT account",
+          ),
           reserveFiveHourPercent: boundedPercent(
             policy?.reserveFiveHourPercent ?? old?.reserveFiveHourPercent ?? 0,
           ),
@@ -232,6 +237,10 @@ export class AccountPool {
         const policy = configured.get(profile.id);
         return {
           ...profile,
+          displayName: normalizedDisplayName(
+            policy?.displayName ?? old?.displayName,
+            path.basename(profile.home) || "ChatGPT account",
+          ),
           reserveFiveHourPercent: boundedPercent(
             policy?.reserveFiveHourPercent ?? old?.reserveFiveHourPercent ?? 0,
           ),
@@ -323,6 +332,12 @@ function reachedReserve(account: AccountUsageState): boolean {
 
 function boundedPercent(value: number): number {
   return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+}
+
+function normalizedDisplayName(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const name = value.trim();
+  return name.length >= 1 && name.length <= 80 ? name : fallback;
 }
 
 function compareAccounts(

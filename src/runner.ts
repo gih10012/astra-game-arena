@@ -1124,7 +1124,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         quotaExhausted = true;
         const account = accountPool.snapshot().accounts.find((entry) => entry.id === activeAccountId);
         exitDescription = account
-          ? `Stopped at configured reserve for ${account.email} (${account.reserveFiveHourPercent}% five-hour, ${account.reserveWeeklyPercent}% weekly)`
+          ? `Stopped at configured reserve for ${account.displayName} (${account.reserveFiveHourPercent}% five-hour, ${account.reserveWeeklyPercent}% weekly)`
           : "Stopped at the configured account reserve";
         controller?.publishTranscript({
           type: "runner.account_reserve",
@@ -1759,7 +1759,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
           if (choice.account) {
             activeAccountId = choice.account.id;
             activeCodexHome = choice.account.home;
-            const accountLabel = path.basename(choice.account.home);
+            const accountLabel = choice.account.displayName;
             await audit.append("account.selected", {
               attempt,
               account: accountLabel,
@@ -2497,7 +2497,10 @@ export function outcomeAfterCleanup(
 
 export function currentCredentialStatus(
   credential: CodexCredentialState | null | undefined,
-  accountPool: { activeAccountId: string | null; accounts: Array<{ id: string; email: string }> } | null,
+  accountPool: {
+    activeAccountId: string | null;
+    accounts: Array<{ id: string; displayName?: string }>;
+  } | null,
 ): CodexCredentialState {
   const current = credential ?? CHATGPT_POOL_CREDENTIAL;
   if (current.mode === "api-key") return { ...current };
@@ -2506,7 +2509,7 @@ export function currentCredentialStatus(
   );
   return {
     ...current,
-    label: active?.email ?? current.label,
+    label: active?.displayName ?? current.label,
   };
 }
 

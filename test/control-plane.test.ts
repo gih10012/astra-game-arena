@@ -175,6 +175,7 @@ test("reports active configuration, account percentages, and earliest reset", as
     accounts: [{
       id: "account-1",
       email: "one@example.com",
+      displayName: "Account One",
       home: "/private/one",
       reserveFiveHourPercent: 25,
       reserveWeeklyPercent: 10,
@@ -196,7 +197,14 @@ test("reports active configuration, account percentages, and earliest reset", as
   assert.equal(status.configuration.offlineMode, true);
   assert.equal(status.configuration.source, "active-run");
   assert.equal(status.configuration.virtualCamera, true);
-  assert.equal(status.currentAccount.email, "one@example.com");
+  assert.equal(status.currentAccount.displayName, "Account One");
+  assert.equal(status.currentCredential.label, "Account One");
+  assert.equal("email" in status.currentAccount, false);
+  const supervisor = await fetch(`${url}/api/supervisor`).then((response) => response.json());
+  assert.equal(supervisor.currentCredential.label, "Account One");
+  assert.equal(supervisor.accountPool.accounts[0].displayName, "Account One");
+  assert.equal("email" in supervisor.accountPool.accounts[0], false);
+  assert.equal("home" in supervisor.accountPool.accounts[0], false);
   assert.equal(status.currentAccount.fiveHour.usedPercent, 37);
   assert.equal(status.currentAccount.fiveHour.remainingPercent, 63);
   assert.equal(status.currentAccount.weekly.remainingPercent, 40);
@@ -279,6 +287,7 @@ test("reports an API key as the current credential without OAuth percentages", a
     accounts: [{
       id: "inactive-oauth-account",
       email: "inactive@example.test",
+      displayName: "Inactive Account",
       home: "/private/oauth-account",
       reserveFiveHourPercent: 35,
       reserveWeeklyPercent: 20,

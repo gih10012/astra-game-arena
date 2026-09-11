@@ -107,7 +107,9 @@ textarea { resize: vertical; min-height: 78px; line-height: 1.5; }
 .pool-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .account-pool { display: grid; gap: 7px; margin-top: 10px; }
 .account-row { display: grid; grid-template-columns: 34px minmax(210px, 1.6fr) minmax(120px, .7fr) minmax(120px, .7fr); align-items: center; gap: 12px; border: 1px solid #1f3035; padding: 8px 10px; background: #0c1417; }
-.account-row .account-name { min-width: 0; }.account-row .account-name b { display: block; overflow: hidden; text-overflow: ellipsis; }.account-row .account-name small { color: var(--muted); }
+.account-row .account-name { min-width: 0; }
+.account-row .account-name input { padding: 6px 8px; font-weight: 700; }
+.account-row .account-name small { margin-top: 3px; color: var(--muted); }
 .quota-field { display: grid; grid-template-columns: 1fr 52px; align-items: center; gap: 7px; color: var(--muted); font-size: 9px; }
 .quota-field input { padding: 6px; text-align: right; }
 .account-enabled { accent-color: var(--teal); width: 16px; height: 16px; }

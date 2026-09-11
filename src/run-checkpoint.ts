@@ -44,6 +44,7 @@ export interface PersistedRunOptions {
 export interface AccountPolicy {
   accountId: string;
   enabled: boolean;
+  displayName?: string;
   reserveFiveHourPercent: number;
   reserveWeeklyPercent: number;
 }

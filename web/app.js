@@ -302,9 +302,15 @@ function renderAccounts(policies = []) {
     const policy = configured.get(account.id);
     const enabled = document.createElement("input"); enabled.type = "checkbox"; enabled.checked = policy?.enabled !== false; enabled.className = "account-enabled";
     const identity = document.createElement("div"); identity.className = "account-name";
-    const email = document.createElement("b"); email.textContent = account.email;
-    const label = document.createElement("small"); label.textContent = account.label;
-    identity.append(email, label);
+    const displayName = document.createElement("input");
+    displayName.type = "text";
+    displayName.maxLength = 80;
+    displayName.required = true;
+    displayName.className = "account-display-name";
+    displayName.value = policy?.displayName || account.displayName || "ChatGPT account";
+    displayName.setAttribute("aria-label", "账号显示名称");
+    const label = document.createElement("small"); label.textContent = "显示名称";
+    identity.append(displayName, label);
     row.append(
       enabled,
       identity,
@@ -375,6 +381,7 @@ function accountPolicies() {
   return [...byId("account-pool").querySelectorAll(".account-row")].map((row) => ({
     accountId: row.dataset.accountId,
     enabled: row.querySelector(".account-enabled").checked,
+    displayName: row.querySelector(".account-display-name").value.trim(),
     reserveFiveHourPercent: Number(row.querySelector(".reserveFiveHour").value),
     reserveWeeklyPercent: Number(row.querySelector(".reserveWeekly").value),
   }));
@@ -987,7 +994,11 @@ async function refreshSupervisor() {
     const active = pool?.accounts?.find((account) => account.id === pool.activeAccountId);
     const credential = state.supervisor.currentCredential;
     const apiKeyActive = credential?.mode === "api-key";
-    byId("active-account").textContent = credential?.label || active?.email || "—";
+    const accountPolicy = state.supervisor.checkpoint?.options?.accountPolicies
+      ?.find((policy) => policy.accountId === pool?.activeAccountId);
+    byId("active-account").textContent = apiKeyActive
+      ? credential?.label || "API key"
+      : accountPolicy?.displayName || active?.displayName || active?.label || "ChatGPT account";
     byId("five-hour").textContent = apiKeyActive
       ? `${String(credential.provider || "custom").toUpperCase()} API KEY`
       : quotaText(active?.primary, active?.reserveFiveHourPercent);
