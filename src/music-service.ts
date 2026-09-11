@@ -269,7 +269,7 @@ export class MusicService {
       this.#notify();
       return;
     }
-    if (!restart && this.#provider && this.#sinkModuleId) {
+    if (!restart && this.#provider && this.#sinkModuleId && this.#phase === "ready") {
       this.#notify();
       return;
     }
@@ -290,22 +290,40 @@ export class MusicService {
         this.#sinkModuleId = "test";
       }
       this.#audioState = "ready";
+      this.#phase = "ready";
+      this.#notify();
+      void this.#playNext(generation);
+
+      this.#danmakuState = {
+        phase: "idle", roomId: null, reconnectAttempt: 0, error: null,
+      };
       this.#danmaku = this.#danmakuFactory(this.#configuration, {
-        onComment: (text, userName) => this.#handleComment(text, userName),
+        onComment: (text, userName) => {
+          if (generation === this.#generation) this.#handleComment(text, userName);
+        },
         onState: (state) => {
+          if (generation !== this.#generation) return;
           this.#danmakuState = state;
           this.#notify();
         },
         onError: (error) => {
-          this.#error = safeError(error);
+          if (generation !== this.#generation) return;
+          this.#danmakuState = {
+            ...this.#danmakuState,
+            error: safeError(error),
+          };
           this.#notify();
         },
       });
-      await this.#danmaku.start();
-      if (generation !== this.#generation) return;
-      this.#phase = "ready";
-      this.#notify();
-      void this.#playNext(generation);
+      void this.#danmaku.start().catch((error) => {
+        if (generation !== this.#generation) return;
+        this.#danmakuState = {
+          ...this.#danmakuState,
+          phase: "reconnecting",
+          error: safeError(error),
+        };
+        this.#notify();
+      });
     } catch (error) {
       this.#phase = "error";
       this.#providerState = this.#provider ? "error" : "stopped";

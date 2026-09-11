@@ -111,8 +111,18 @@ function positiveInteger(value: number | string, label: string): number {
 }
 
 async function fetchJson<T>(fetcher: typeof fetch, url: URL): Promise<T> {
+  const roomId = url.searchParams.get("id") ?? url.searchParams.get("room_id") ?? "";
   const response = await fetcher(url, {
-    headers: { accept: "application/json" },
+    headers: {
+      accept: "application/json",
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      referer: roomId
+        ? `https://live.bilibili.com/${encodeURIComponent(roomId)}`
+        : "https://live.bilibili.com/",
+      "user-agent":
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    },
     signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) {
@@ -353,6 +363,12 @@ export class BilibiliDanmakuClient {
   async start(): Promise<void> {
     if (!this.#stopped) return;
     this.#stopped = false;
+    await this.#initialize();
+  }
+
+  async #initialize(): Promise<void> {
+    if (this.#stopped) return;
+    this.#setState(this.#reconnectAttempt > 0 ? "reconnecting" : "connecting", null);
     try {
       this.#configuration = await fetchBilibiliDanmakuConfiguration(
         this.#options.roomId,
@@ -362,11 +378,10 @@ export class BilibiliDanmakuClient {
       this.#setState("connecting", null);
       this.#connect();
     } catch (error) {
-      this.#stopped = true;
+      if (this.#stopped) return;
+      this.#configuration = null;
       const normalized = asError(error);
-      this.#setState("closed", normalized.message);
-      this.#reportError(normalized);
-      throw normalized;
+      this.#scheduleReconnect(normalized);
     }
   }
 
@@ -502,8 +517,10 @@ export class BilibiliDanmakuClient {
     const delay = Math.max(1, Math.round(exponential * jitter));
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = null;
-      this.#connect();
+      if (this.#configuration) this.#connect();
+      else void this.#initialize();
     }, delay);
+    this.#reconnectTimer.unref();
   }
 
   #setState(phase: BilibiliDanmakuPhase, error: string | null): void {

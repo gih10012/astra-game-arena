@@ -53,3 +53,49 @@ test("music queue rejects current and queued duplicate tracks", async () => {
   assert.equal(service.snapshot.current?.requestedBy, "alice");
   await service.close();
 });
+
+test("daily playback remains ready when danmaku initialization fails", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "arena-music-service-"));
+  await writeMusicConfiguration(root, { ...defaultMusicConfiguration(), enabled: true });
+  const track: MusicTrack = {
+    id: "daily-1", hash: "daily-1", title: "每日歌曲", artist: "歌手", source: "test",
+  };
+  const provider: MusicProvider = {
+    id: "test",
+    start: async () => undefined,
+    health: async () => true,
+    healthy: async () => true,
+    search: async () => [],
+    dailyRecommendations: async () => [track],
+    resolvePlayable: async () => ({ ...track, url: "https://example.invalid/song.mp3", resolvedHash: track.hash, quality: "128" }),
+    lyrics: async () => [],
+    prepareTrack: async () => ({ track, url: "https://example.invalid/song.mp3", resolvedHash: track.hash, quality: "128", lyrics: [] }),
+    claimVip: async () => ({ claimed: false }),
+    close: async () => undefined,
+  };
+  const service = await MusicService.open(root, () => undefined, {
+    providerFactory: () => provider,
+    danmakuFactory: (_configuration, callbacks) => ({
+      start: async () => {
+        callbacks.onState({
+          phase: "reconnecting", roomId: null, reconnectAttempt: 1, error: "fetch failed",
+        });
+      },
+      close: () => undefined,
+    }) as never,
+    pulse: false,
+  });
+
+  await service.activate();
+  await settle();
+  assert.equal(service.snapshot.runtime.phase, "ready");
+  assert.equal(service.snapshot.runtime.provider, "ready");
+  assert.equal(service.snapshot.runtime.audio, "playing");
+  assert.equal(service.snapshot.runtime.danmaku.phase, "reconnecting");
+  assert.equal(service.snapshot.current?.track.id, "daily-1");
+  await service.close();
+});
+
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}

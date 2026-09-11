@@ -3,6 +3,7 @@ import test from "node:test";
 import { brotliCompressSync, deflateSync } from "node:zlib";
 import {
   BilibiliDanmakuClient,
+  type BilibiliDanmakuState,
   type BilibiliWebSocket,
   decodeBilibiliDanmakuMessages,
   encodeBilibiliPacket,
@@ -19,9 +20,12 @@ function jsonResponse(value: unknown): Response {
 }
 
 function fakeBilibiliFetch(calls: string[]): typeof fetch {
-  return (async (input: string | URL | Request) => {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
     calls.push(url.toString());
+    const headers = new Headers(init?.headers);
+    assert.match(headers.get("user-agent") ?? "", /Chrome/);
+    assert.match(headers.get("referer") ?? "", /^https:\/\/live\.bilibili\.com\//);
     if (url.pathname.endsWith("/room_init")) {
       return jsonResponse({ code: 0, data: { room_id: 7654321 } });
     }
@@ -222,6 +226,38 @@ test("client authenticates, heartbeats, emits comments, reconnects, and closes",
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(client.state.phase, "closed");
   assert.equal(sockets.length, 2);
+});
+
+test("client retries initial configuration failures without being restarted", async () => {
+  let requests = 0;
+  const sockets: FakeWebSocket[] = [];
+  const states: BilibiliDanmakuState[] = [];
+  const client = new BilibiliDanmakuClient({
+    roomId: 1234,
+    onComment: () => undefined,
+    onState: (state) => states.push(state),
+    fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+      requests += 1;
+      if (requests === 1) throw new Error("temporary network failure");
+      return await fakeBilibiliFetch([])(input, init);
+    }) as typeof fetch,
+    WebSocket: () => {
+      const socket = new FakeWebSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    reconnectBaseDelayMs: 1,
+    reconnectMaxDelayMs: 1,
+    random: () => 0.5,
+  });
+
+  await client.start();
+  assert.equal(client.state.phase, "reconnecting");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(requests >= 3);
+  assert.equal(sockets.length, 1);
+  assert.ok(states.some((state) => state.error === "temporary network failure"));
+  client.close();
 });
 
 test("rejects malformed packet lengths without partial parsing", () => {
