@@ -170,6 +170,12 @@ export async function startVirtualGame(options: {
     options.game,
     options.launchMode ?? (options.offlineMode === true ? "direct" : false),
   );
+  if (launchStrategy === "direct-offline" && options.game.appId === "1260520") {
+    throw new Error(
+      "Patrick's Parabox requires a private Steam client for Steamworks initialization; " +
+        "use Steam Online or Steam Offline mode instead of Direct / no Steam",
+    );
+  }
   const runtimeGate = createProcessRuntimeGate(
     options.runtimeId ?? path.basename(options.runtimeDirectory),
   );

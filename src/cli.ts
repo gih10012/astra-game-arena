@@ -145,14 +145,24 @@ if (command === "doctor") {
   if (!sourceRunDirectory) {
     throw new Error("Usage: game-arena continue-archived <run-directory>");
   }
+  const archivedRunDirectory = path.resolve(sourceRunDirectory);
+  const archivedCheckpoint = (await CheckpointStore.load(archivedRunDirectory)).snapshot();
+  const archivedLaunchMode = archivedCheckpoint.options.launchMode ??
+    (archivedCheckpoint.options.offlineMode === true ? "direct" : "steam-offline");
   const operator = await readOperatorDefaults(rootDirectory);
-  const outcome = await queueArchivedContinuation(path.resolve(sourceRunDirectory), {
+  const outcome = await queueArchivedContinuation(archivedRunDirectory, {
     rootDirectory,
     publicPort: 4317,
     port: 4318,
     model: operator.model,
     gpuPreference: "auto",
-    launchMode: "direct",
+    // Preserve the launch contract that produced the archived save.  In
+    // particular, legacy Parabox runs used a private Steam client to provide
+    // Steamworks.  A legacy checkpoint did not name that launch mode, so use
+    // the cached offline client: it is deterministic and avoids waiting for
+    // an online login.  Forcing a no-Steam launch gets past the FMOD splash
+    // but leaves the game permanently black after SteamAPI_Init fails.
+    launchMode: archivedLaunchMode,
     reasoningEffort: operator.reasoningEffort,
     record: operator.record,
     virtualCamera: operator.virtualCamera,
