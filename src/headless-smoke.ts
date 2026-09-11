@@ -26,6 +26,7 @@ import {
 import { SaveGuard } from "./save-guard.js";
 import { TARGET_LEVELS } from "./types.js";
 import { findInstalledSteamGame } from "./steam-catalog.js";
+import { startPrivateGameAudio, type PrivateGameAudio } from "./private-audio.js";
 
 export async function runHeadlessSmoke(rootDirectory: string): Promise<{
   display: string;
@@ -55,11 +56,14 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
   let dashboard: VirtualDashboardRuntime | null = null;
   let recorder: ActiveRecordingPair | null = null;
   let virtualCamera: ActiveVirtualCamera | null = null;
+  let privateAudio: PrivateGameAudio | null = null;
   try {
+    privateAudio = await startPrivateGameAudio(path.basename(output));
     runtime = await startVirtualGame({
       rootDirectory,
       runtimeDirectory,
       game: await findInstalledSteamGame("1260520"),
+      audioSinkName: privateAudio.sinkName,
     });
     game = new X11GameAdapter({
       display: runtime.display,
@@ -155,6 +159,7 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
       attempt: 1,
       game: runtime,
       dashboard,
+      audioSource: `${privateAudio.sinkName}.monitor`,
       audit,
     });
     await delay(1_800);
@@ -201,6 +206,7 @@ export async function runHeadlessSmoke(rootDirectory: string): Promise<{
     await controller?.close().catch(() => undefined);
     await game?.close().catch(() => undefined);
     await runtime?.close().catch(() => undefined);
+    await privateAudio?.close().catch(() => undefined);
     await saveGuard.restore();
   }
 }
@@ -235,6 +241,21 @@ async function validateRecording(filename: string): Promise<number> {
   const duration = Number(probe.stdout.toString("utf8").trim());
   if (probe.code !== 0 || duration < 4.5 || duration > 15) {
     throw new Error(`Unexpected smoke recording duration: ${duration}`);
+  }
+  const audio = await runCommand("ffprobe", [
+    "-v", "error", "-select_streams", "a:0",
+    "-show_entries", "stream=codec_name,sample_rate,channels",
+    "-of", "json", filename,
+  ]);
+  const audioProbe = JSON.parse(audio.stdout.toString("utf8")) as {
+    streams?: Array<{ codec_name?: string; sample_rate?: string; channels?: number }>;
+  };
+  if (
+    audio.code !== 0 || audioProbe.streams?.[0]?.codec_name !== "opus" ||
+    audioProbe.streams[0].sample_rate !== "48000" ||
+    audioProbe.streams[0].channels !== 2
+  ) {
+    throw new Error("Smoke recording does not contain the private game Opus audio stream");
   }
   const decode = await runCommand("ffmpeg", [
     "-nostdin", "-v", "error", "-i", filename, "-f", "null", "-",

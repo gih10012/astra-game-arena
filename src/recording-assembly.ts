@@ -12,7 +12,7 @@ import {
   type RunCheckpoint,
 } from "./run-checkpoint.js";
 
-const ASSEMBLY_VERSION = 5;
+const ASSEMBLY_VERSION = 6;
 const FRAMES_PER_SECOND = 30;
 
 export interface AuditEvent {
@@ -196,9 +196,12 @@ export async function assembleRecordings(
         listPath,
         "-map",
         "0:v:0",
-        "-an",
+        "-map",
+        "0:a:0?",
         "-sn",
         "-c:v",
+        "copy",
+        "-c:a",
         "copy",
         "-f",
         "matroska",
@@ -423,10 +426,15 @@ async function normalizeRecording(
     "-y",
   ];
   args.push("-i", source);
+  const sourceMedia = await validateVideo(source);
+  if (!sourceMedia.hasAudio) {
+    args.push("-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo");
+  }
   args.push(
     "-map",
     "0:v:0",
-    "-an",
+    "-map",
+    sourceMedia.hasAudio ? "0:a:0" : "1:a:0",
     "-sn",
     "-vf",
     `fps=${FRAMES_PER_SECOND},setpts=N/(${FRAMES_PER_SECOND}*TB)`,
@@ -446,6 +454,17 @@ async function normalizeRecording(
     "yuv420p",
     "-fps_mode",
     "cfr",
+    "-af",
+    "apad",
+    "-shortest",
+    "-c:a",
+    "libopus",
+    "-b:a",
+    "160k",
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
     "-f",
     "matroska",
     temporary,
@@ -467,6 +486,7 @@ async function normalizeRecording(
 async function validateVideo(filename: string): Promise<{
   durationSeconds: number;
   bytes: number;
+  hasAudio: boolean;
 }> {
   const probe = JSON.parse(
     (
@@ -475,10 +495,8 @@ async function validateVideo(filename: string): Promise<{
         [
           "-v",
           "error",
-          "-select_streams",
-          "v:0",
           "-show_entries",
-          "stream=width,height:format=duration,size",
+          "stream=codec_type,width,height:format=duration,size",
           "-of",
           "json",
           filename,
@@ -487,12 +505,12 @@ async function validateVideo(filename: string): Promise<{
       )
     ).toString("utf8"),
   ) as {
-    streams?: Array<{ width?: number; height?: number }>;
+    streams?: Array<{ codec_type?: string; width?: number; height?: number }>;
     format?: { duration?: string; size?: string };
   };
   const durationSeconds = Number(probe.format?.duration);
   const bytes = Number(probe.format?.size ?? (await stat(filename)).size);
-  const video = probe.streams?.[0];
+  const video = probe.streams?.find((stream) => stream.codec_type === "video");
   if (
     !video ||
     !Number.isFinite(video.width) ||
@@ -505,7 +523,11 @@ async function validateVideo(filename: string): Promise<{
   ) {
     throw new Error(`FFmpeg produced an invalid recording: ${filename}`);
   }
-  return { durationSeconds, bytes };
+  return {
+    durationSeconds,
+    bytes,
+    hasAudio: probe.streams?.some((stream) => stream.codec_type === "audio") ?? false,
+  };
 }
 
 async function readAuditEvents(filename: string): Promise<AuditEvent[]> {

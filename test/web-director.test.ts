@@ -18,6 +18,9 @@ test("director bootstrap uses the internal controller event and supervisor surfa
   assert.match(script, /events\.addEventListener\("frame"/);
   assert.match(script, /events\.addEventListener\("broadcast"/);
   assert.match(script, /\/api\/live-audio\.ogg/);
+  assert.match(script, /\/api\/music\/audio\.ogg/);
+  assert.match(script, /events\.addEventListener\("music"/);
+  assert.match(script, /updateMusicOverlays/);
   assert.match(script, /replay\.mjpeg/);
   assert.match(script, /replay-audio\.ogg/);
   assert.match(script, /回放画面流中断，正在重连/);

@@ -285,6 +285,16 @@ test("keeps a sealed resumed part instead of trimming its opening", async () => 
   assert.equal(result.sources.length, 2);
   assert.match(result.sources[0] ?? "", /challenge-part-0001\.mkv$/);
   assert.ok(result.durationSeconds > 0);
+  const audio = JSON.parse((await expectCommand("ffprobe", [
+    "-v", "error", "-select_streams", "a:0",
+    "-show_entries", "stream=codec_name,sample_rate,channels",
+    "-of", "json", result.output,
+  ])).toString("utf8")) as {
+    streams?: Array<{ codec_name?: string; sample_rate?: string; channels?: number }>;
+  };
+  assert.deepEqual(audio.streams?.[0], {
+    codec_name: "opus", sample_rate: "48000", channels: 2,
+  });
 
   const persisted = checkpoint("paused", runDirectory);
   persisted.elapsedMs = 39_907;

@@ -183,6 +183,42 @@
               <p class="preview-note">预览静音以防监听回声；OBS 页面源仍按上方声音设置输出。</p>
             </div>
           </div>
+          <div class="pool-section music-control-section">
+            <div class="pool-heading">
+              <div><span class="eyebrow">DANMAKU JUKEBOX</span><h3>弹幕点歌与播出音乐</h3></div>
+              <small id="music-runtime-status">未启用</small>
+            </div>
+            <div class="switch-grid music-switches">
+              <label class="record-switch"><input id="music-enabled" type="checkbox" /><span class="switch"></span><span><b>启用点歌</b><small>音乐与游戏声音一同进入 /live</small></span></label>
+              <label class="record-switch"><input id="music-daily" type="checkbox" /><span class="switch"></span><span><b>每日推荐兜底</b><small>队列为空时随机播放</small></span></label>
+              <label class="record-switch"><input id="music-vip-auto" type="checkbox" /><span class="switch"></span><span><b>自动领取 VIP</b><small>受限曲目失败时尝试签到</small></span></label>
+              <label class="record-switch"><input id="music-now-playing" type="checkbox" /><span class="switch"></span><span><b>显示歌曲信息</b></span></label>
+              <label class="record-switch"><input id="music-hint-enabled" type="checkbox" /><span class="switch"></span><span><b>显示点歌提示</b></span></label>
+              <label class="record-switch"><input id="music-lyrics-enabled" type="checkbox" /><span class="switch"></span><span><b>竖排同步歌词</b></span></label>
+            </div>
+            <div class="form-grid music-fields">
+              <label class="field"><span>B 站直播间 ID</span><input id="music-room-id" type="text" inputmode="numeric" maxlength="30" /></label>
+              <label class="field"><span>弹幕命令</span><input id="music-request-prefix" type="text" maxlength="20" /><small>例如：点歌 晴天</small></label>
+              <label class="field"><span>音乐源</span><select id="music-provider"><option value="moekoe">本机萌音 / Kugou</option><option value="compatible">兼容 HTTP 音乐源</option></select></label>
+              <label class="field"><span>音乐源地址</span><input id="music-provider-url" type="text" maxlength="512" /></label>
+              <label class="field"><span>本机服务程序</span><input id="music-provider-binary" type="text" maxlength="1024" /></label>
+              <label class="field"><span>已登录资料目录</span><input id="music-profile-directory" type="text" maxlength="1024" /></label>
+              <label class="field"><span>音乐音量</span><input id="music-volume" type="range" min="0" max="1" step="0.05" /><small id="music-volume-label">70%</small></label>
+              <label class="field"><span>队列显示</span><select id="music-queue-mode"><option value="changes">变动时显示</option><option value="always">始终显示</option><option value="off">不显示</option></select></label>
+              <label class="field"><span>队列显示秒数</span><input id="music-queue-seconds" type="number" min="1" max="120" /></label>
+              <label class="field"><span>歌曲信息秒数</span><input id="music-now-seconds" type="number" min="1" max="120" /></label>
+              <label class="field"><span>提示循环间隔（秒）</span><input id="music-hint-interval" type="number" min="0" max="3600" /><small>0 = 不定时显示</small></label>
+              <label class="field"><span>歌词位置 X / Y (%)</span><div class="inline-pair"><input id="music-lyrics-x" type="number" min="0" max="100" /><input id="music-lyrics-y" type="number" min="0" max="100" /></div></label>
+              <label class="field music-hint-field"><span>点歌提示文字</span><input id="music-hint-text" type="text" maxlength="120" /></label>
+            </div>
+            <div class="music-actions">
+              <div class="inline-field"><input id="music-manual-query" type="text" placeholder="手动点歌：输入歌名" /><button id="music-request-button" type="button">加入队列</button></div>
+              <button id="music-skip-button" type="button">切歌</button>
+              <button id="music-vip-button" type="button">领取 3 小时 VIP</button>
+              <span id="music-action-message"></span>
+            </div>
+            <div id="music-control-queue" class="music-control-queue">队列为空</div>
+          </div>
           <div class="pool-section">
             <div class="pool-heading">
               <div><span class="eyebrow">REPLAY PLAYLIST</span><h3>本地录像库</h3></div>
@@ -283,6 +319,20 @@
       <div id="broadcast-stream-note" class="broadcast-stream-note" hidden></div>
     </section>
     <audio id="live-audio" autoplay></audio>
+    <audio id="music-audio" autoplay></audio>
+    <section id="music-overlay" class="music-overlay" hidden>
+      <div id="music-now-overlay" class="music-now-overlay" hidden>
+        <span>NOW PLAYING</span>
+        <strong id="music-now-title"></strong>
+        <small id="music-now-artist"></small>
+        <em id="music-now-hint"></em>
+      </div>
+      <div id="music-queue-overlay" class="music-queue-overlay" hidden>
+        <span>点歌队列</span><ol id="music-queue-list"></ol>
+      </div>
+      <div id="music-hint-overlay" class="music-hint-overlay" hidden></div>
+      <div id="music-lyric-overlay" class="music-lyric-overlay" hidden></div>
+    </section>
     <script src="/app.js" defer></script>
   </body>
 </html>

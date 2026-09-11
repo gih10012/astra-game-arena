@@ -30,6 +30,7 @@ export async function startRecordingPair(options: {
   attempt: number;
   game: VirtualGameRuntime;
   dashboard: VirtualDashboardRuntime;
+  audioSource?: string;
   audit: AuditLog;
   onUnexpectedExit?: (message: string) => void;
 }): Promise<ActiveRecordingPair> {
@@ -50,6 +51,7 @@ export async function startRecordingPair(options: {
     continuousGameRecorderArguments({
       output: path.join(options.runDirectory, metadata.game),
       outputName: options.game.captureWayland.output,
+      ...(options.audioSource ? { audioSource: options.audioSource } : {}),
     }),
     {
       env: options.game.captureWayland.environment,
@@ -157,12 +159,17 @@ export async function composeRecordingPair(
         "-filter_complex",
         directorCompositionFilter("yuv420p", FPS),
         "-map", "[v]",
-        "-an", "-sn",
+        "-map", "0:a:0?",
+        "-sn",
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "18",
         "-pix_fmt", "yuv420p",
         "-fps_mode", "cfr",
+        "-c:a", "libopus",
+        "-b:a", "160k",
+        "-ar", "48000",
+        "-ac", "2",
         "-f", "matroska",
         temporary,
       ],

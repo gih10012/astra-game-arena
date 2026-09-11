@@ -4,8 +4,9 @@
 
 `http://127.0.0.1:4317/live` is the only source an OBS scene needs. Configure
 it as a 1920×1080 Browser Source and enable OBS's **Control audio via OBS**
-option. The Web page includes the image, the private game audio, mode labels,
-and transitions; the implementation endpoints are not separate OBS inputs.
+option. The Web page includes the image, the private game audio, optional
+jukebox music, overlays, mode labels, and transitions; the implementation
+endpoints are not separate OBS inputs.
 
 The watchdog owns the page and media routes, so it remains reachable when no
 challenge is active. It never opens a window on the physical compositor.
@@ -41,6 +42,35 @@ queries are rejected. FFmpeg reads each item at normal playback speed and
 server-decodes its picture into a continuous MJPEG stream. Audio, when present,
 is separately encoded as Opus inside the same page. OBS still receives both
 through its single Browser Source; silent source files remain silent.
+
+## Bilibili point-song jukebox
+
+The same live-control dialog configures a provider-neutral music service owned
+by the watchdog. Its default provider starts the installed MoeKoeMusic local
+API and uses the existing logged-in profile to access the Kugou catalog. A
+compatible HTTP source can be substituted without changing the Bilibili,
+queue, playback, or overlay layers. Provider credentials are loaded only in
+memory and are never returned by an arena endpoint.
+
+The server resolves the configured Bilibili room, connects directly to its WSS
+danmaku hosts, and accepts comments in the form `点歌 歌名` by default. Requests
+are searched, reduced to one stable track ID, and deduplicated against both the
+current song and the waiting queue. When no request is waiting, a random unused
+item from the configured daily-recommendation card is played. A restricted
+track can trigger the legacy three-hour VIP check-in before one retry.
+
+Music is decoded by a server-side FFmpeg player into an isolated PulseAudio
+null sink. `/live` subscribes to that monitor as 48 kHz stereo Opus, so it works
+during a challenge, replay, or idle standby and never leaks desktop or physical
+microphone audio. The program page itself draws the now-playing card, point-song
+hint, queue-on-change, and current KRC lyric line. The control page can disable
+each overlay, select always/change/off queue behavior, set display/periodic
+timings, position vertical lyrics by X/Y percentage, adjust volume, request a
+song manually, skip, or check in for VIP.
+
+The sanitized state/actions are available at `/api/music`; persistent settings
+live in ignored `.arena/music-config.json`. `/api/music/audio.ogg` is an
+implementation stream used inside the one program page, not a second OBS source.
 
 ## Audio isolation
 

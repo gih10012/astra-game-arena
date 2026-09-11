@@ -31,7 +31,7 @@ Generate a fresh six-second 1920×1080 sample from the installed game without us
 node dist/src/cli.js smoke-headless
 ```
 
-The command writes a playable `recordings/challenge-part-0001.mkv` under `.arena/`, with the native game on the left and the compact director dashboard on the right. It also verifies 30 FPS, changing native pixels, and save restoration.
+The command writes a playable `recordings/challenge-part-0001.mkv` under `.arena/`, with the native game on the left and the compact director dashboard on the right. It also verifies 30 FPS, changing native pixels, a 48 kHz stereo Opus stream from the private game sink, and save restoration.
 
 ## Requirements
 
@@ -123,7 +123,7 @@ Defaults:
 - completion: agent-declared success for the configured goal (Parabox referee reports `364/364`)
 - prompt: generated from the configured natural-language goal and isolated computer-use tools
 - optional prompt guidance: explicitly encourages creating and using local scripts, skills, and sub-agents when that saves time or tokens
-- recording: 1920×1080, 30 FPS Matroska parts from private displays
+- recording: 1920×1080, 30 FPS Matroska parts from private displays, with 48 kHz stereo Opus captured only from the private game sink
 - virtual outputs: optional 1920×1080, 30 FPS V4L2 camera with the same game/session layout, plus an `Astra Game Microphone` PipeWire source containing only audio routed by the private game runtime
 - UI: native game at 1920×1080; the final 1280×1080 game pane preserves its aspect ratio, beside a 640×1080 director dashboard
 - physical desktop windows: none by default; `--browser` opens only the monitoring dashboard
@@ -203,6 +203,9 @@ The loopback director server exposes:
 - `DELETE /api/broadcast/media?id=…` — forget a manually added path without deleting the underlying video
 - `GET /api/broadcast/replay.mjpeg?id=…` — server-decoded replay picture for a selected playlist item, avoiding browser GPU-video overlays
 - `GET /api/broadcast/replay-audio.ogg?id=…` — matching Opus audio when the selected item contains audio
+- `GET /api/music` / `PATCH /api/music` — sanitized runtime state and durable point-song/source/overlay settings
+- `POST /api/music/request`, `/api/music/skip`, `/api/music/vip` — manual queue, skip, and three-hour VIP check-in controls
+- `GET /api/music/audio.ogg` — the server-side broadcast music sink as a reconnectable Opus stream used by `/live`
 
 ## One-source OBS live page
 
@@ -220,6 +223,15 @@ page itself is the program output and contains all of these transitions:
 - when no selected replay is available, the director remains in a truthful
   standby state instead of inventing footage.
 
+The same page can run the optional Bilibili jukebox in every mode. A viewer
+sends `点歌 歌名` (the command is configurable); the server receives native
+Bilibili WebSocket events, deduplicates the queue, and plays a random daily
+recommendation whenever the queue is empty. Song/artist cards, queue changes,
+the interaction hint, and the current vertically rendered synchronized lyric
+are composited by `/live` itself. Their visibility, timings, and lyric X/Y
+position are live settings, so OBS needs no additional browser, audio, or text
+source.
+
 Open `http://127.0.0.1:4317/control`, then choose **直播控制** to set automatic,
 forced-live, or forced-replay mode; choose replay triggers; order files; change
 the badge and volume; or preview the exact output with monitoring muted. The
@@ -228,6 +240,15 @@ server persists these settings to ignored local state at
 `localStorage` draft until successfully submitted. Dropped browser tabs,
 watchdog restarts, and machine restarts do not lose the saved broadcast
 configuration. See [`docs/BROADCAST.md`](docs/BROADCAST.md) for details.
+
+Music settings are independently saved to ignored local state at
+`.arena/music-config.json`. The default adapter uses the already logged-in
+MoeKoeMusic profile and its Kugou catalog; credentials are read only for each
+local provider request and never appear in the saved configuration or status
+API. A MoeKoe-compatible HTTP source can be selected instead, while the
+danmaku, queue, daily fallback, lyrics, and overlays remain provider-neutral.
+Restricted-track failures can automatically perform the configured legacy
+three-hour VIP check-in, and the control page also exposes a manual check-in.
 
 ## Optional virtual camera and game microphone
 

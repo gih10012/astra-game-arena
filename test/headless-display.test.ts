@@ -161,10 +161,13 @@ test("records the continuous private compositor and dashboard displays", () => {
   const game = continuousGameRecorderArguments({
     outputName: "HEADLESS-1",
     output: "/run/game.mkv",
+    audioSource: "astra_game_audio_run.monitor",
   });
   assert.ok(game.includes("HEADLESS-1"));
   assert.ok(game.includes("30"));
   assert.ok(game.includes("--no-dmabuf"));
+  assert.ok(game.includes("--audio=astra_game_audio_run.monitor"));
+  assert.ok(game.includes("libopus"));
   assert.equal(game.at(-1), "/run/game.mkv");
 
   const dashboard = dashboardRecorderArguments({

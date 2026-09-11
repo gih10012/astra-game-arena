@@ -60,6 +60,15 @@ test("serves the durable control page with every pre-run setting", async (contex
     "replay-image",
     "replay-audio",
     "live-audio",
+    "music-audio",
+    "music-enabled",
+    "music-room-id",
+    "music-provider",
+    "music-control-queue",
+    "music-now-overlay",
+    "music-queue-overlay",
+    "music-hint-overlay",
+    "music-lyric-overlay",
   ]) {
     assert.match(html, new RegExp(`id=["']${id}["']`));
   }
@@ -70,6 +79,18 @@ test("serves the durable control page with every pre-run setting", async (contex
   assert.equal(broadcast.playback.mode, "standby");
   assert.equal(broadcast.configuration.mode, "auto");
   assert.equal(broadcast.liveUrl, `${url}/live`);
+  const music = await fetch(`${url}/api/music`).then((response) => response.json());
+  assert.equal(music.configuration.roomId, "1912485907");
+  assert.equal(music.configuration.enabled, false);
+  assert.equal(music.runtime.phase, "disabled");
+  const updatedMusic = await fetch(`${url}/api/music`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hintText: "发送点歌命令", hintIntervalSeconds: 0 }),
+  }).then((response) => response.json());
+  assert.equal(updatedMusic.configuration.hintText, "发送点歌命令");
+  assert.equal(updatedMusic.configuration.hintIntervalSeconds, 0);
+  assert.equal((await fetch(`${url}/api/music/audio.ogg`)).status, 409);
 
   const status = await fetch(`${url}/api/status`).then((response) => response.json());
   assert.equal(status.service.name, "astra-game-arena");
@@ -87,6 +108,7 @@ test("serves the durable control page with every pre-run setting", async (contex
   assert.equal(status.virtualMicrophone.enabled, false);
   assert.equal(status.broadcast.configuration.mode, "auto");
   assert.equal(status.broadcast.playback.mode, "standby");
+  assert.equal(status.music.configuration.hintText, "发送点歌命令");
   assert.deepEqual(status.continuity, {
     mode: "retained-live-process",
     runtimeRetained: false,

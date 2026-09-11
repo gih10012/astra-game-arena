@@ -13,14 +13,15 @@
 
 For OBS specifically, the preferred setup is a single 1920×1080 Browser Source
 pointing to `http://127.0.0.1:4317/live` with **Control audio via OBS** enabled.
-That one page carries the complete director picture and game sound, and can
+That one page carries the complete director picture, game sound, and optional
+Bilibili point-song music/overlays, and can
 visibly switch to the locally configured replay playlist while idle or waiting
 for quota. The replay label and reset time make the source type explicit; see
 [`BROADCAST.md`](BROADCAST.md).
 
 ## During the take
 
-The runner opens the selected native game inside Cage's private headless Xwayland. `wf-recorder` continuously captures the native game output, and FFmpeg combines it with the compact director dashboard from a second private Xvfb display. It opens nothing on niri or any other physical compositor by default. The controller logs a loopback dashboard URL; `--browser` is the explicit opt-in to open it automatically. Do not interact after the timer starts. Infrastructure recovery is allowed only through the recorded watchdog path; human gameplay makes the run invalid.
+The runner opens the selected native game inside Cage's private headless Xwayland. `wf-recorder` continuously captures the native game output together with the run-specific game sink monitor as 48 kHz stereo Opus, and FFmpeg combines it with the compact director dashboard from a second private Xvfb display while retaining that audio. It opens nothing on niri or any other physical compositor by default. The controller logs a loopback dashboard URL; `--browser` is the explicit opt-in to open it automatically. Do not interact after the timer starts. Infrastructure recovery is allowed only through the recorded watchdog path; human gameplay makes the run invalid.
 
 When enabled, a second live compositor capture is combined with that same dashboard and written to the selected V4L2 loopback output at 1920×1080/30 FPS. The private game is also assigned a dedicated PipeWire/PulseAudio-compatible sink whose monitor is published as `Astra Game Microphone`. It excludes the physical microphone and ordinary desktop audio. The outputs stop while the challenge is paused and return from the same retained game process on resume; the video path never reads from or overwrites a physical webcam.
 

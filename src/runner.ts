@@ -678,6 +678,7 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         attempt: currentAttempt,
         game: virtualGame,
         dashboard: virtualDashboard,
+        audioSource: `${privateAudio!.sinkName}.monitor`,
         audit,
         onUnexpectedExit: (message) => {
           if (!started || recorder !== started || started.stopping) return;

@@ -46,7 +46,8 @@ test("composes native game and transcript streams into CFR 1920x1080 video", asy
   await Promise.all([
     expectCommand("ffmpeg", [
       "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30",
-      "-t", "0.5", "-c:v", "libx264", "-preset", "ultrafast", game,
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+      "-t", "0.5", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "libopus", game,
     ]),
     expectCommand("ffmpeg", [
       "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=navy:size=1920x1080:rate=30",
@@ -63,6 +64,11 @@ test("composes native game and transcript streams into CFR 1920x1080 video", asy
     "-of", "json", path.join(runDirectory, relative),
   ])).toString("utf8")) as { streams: Array<{ width: number; height: number; r_frame_rate: string }> };
   assert.deepEqual(probe.streams[0], { width: 1920, height: 1080, r_frame_rate: "30/1" });
+  const audioProbe = JSON.parse((await expectCommand("ffprobe", [
+    "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels",
+    "-of", "json", path.join(runDirectory, relative),
+  ])).toString("utf8")) as { streams: Array<{ codec_name: string; sample_rate: string; channels: number }> };
+  assert.deepEqual(audioProbe.streams[0], { codec_name: "opus", sample_rate: "48000", channels: 2 });
   const pair = {
     attempt: 1,
     game: path.relative(runDirectory, game),

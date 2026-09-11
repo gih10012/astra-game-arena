@@ -147,6 +147,10 @@ if (command === "doctor") {
   await runWatchdog(rootDirectory, {
     pollMs: numberArg(args, "--poll-seconds", 1) * 1_000,
   });
+  // Native outbound WebSocket/HTTP pools can retain idle handles after their
+  // visible streams are closed. The daemon reaches here only after SIGINT or
+  // SIGTERM and after ControlPlane.close() has completed every child cleanup.
+  process.exit(0);
 } else if (command === "assembly-daemon") {
   await runAssemblyWatcher(rootDirectory, {
     pollMs: numberArg(args, "--poll-seconds", 10) * 1_000,

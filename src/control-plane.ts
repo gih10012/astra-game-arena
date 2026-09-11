@@ -69,6 +69,7 @@ import {
   type BroadcastConfiguration,
   type BroadcastMediaItem,
 } from "./broadcast.js";
+import { MusicService } from "./music-service.js";
 
 const webRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -160,6 +161,7 @@ export class ControlPlane {
   #configurationUpdates: Promise<void> = Promise.resolve();
   #pendingConfigurationIds = new Map<string, string>();
   #lastOperatorConfigurationKey = "";
+  #music: MusicService | null = null;
 
   constructor(rootDirectory: string, options: { host?: string; port?: number } = {}) {
     this.rootDirectory = path.resolve(rootDirectory);
@@ -176,6 +178,9 @@ export class ControlPlane {
 
   async listen(): Promise<string> {
     if (this.#server) return this.url;
+    this.#music = await MusicService.open(this.rootDirectory, (snapshot) => {
+      this.#broadcast("music", snapshot);
+    });
     this.#server = createServer((request, response) => {
       void this.#handle(request, response).catch((error: unknown) => {
         const status = error instanceof HttpError ? error.status : 500;
@@ -189,6 +194,7 @@ export class ControlPlane {
       this.#server?.listen(this.port, this.host, resolve);
     });
     await this.refresh();
+    void this.#music.activate();
     this.#refreshTimer = setInterval(() => void this.refresh(), 500);
     this.#refreshTimer.unref();
     return this.url;
@@ -214,11 +220,21 @@ export class ControlPlane {
       client.end();
     }
     this.#replayStreams.clear();
+    await this.#music?.close();
+    this.#music = null;
     if (!this.#server) return;
     const server = this.#server;
     this.#server = null;
     await new Promise<void>((resolve) => {
-      server.close(() => resolve());
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        resolve();
+      };
+      const deadline = setTimeout(finish, 2_000);
+      server.close(finish);
       server.closeAllConnections();
     });
   }
@@ -312,7 +328,7 @@ export class ControlPlane {
         virtualCameras,
         operatorConfiguration,
         mediaState,
-      }), broadcast });
+      }), broadcast, music: this.#music?.snapshot ?? null });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/supervisor") {
@@ -402,6 +418,43 @@ export class ControlPlane {
         "audio/ogg; codecs=opus",
         "private game audio stream",
       );
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/music") {
+      json(response, 200, this.#requiredMusic().snapshot);
+      return;
+    }
+    if (request.method === "PATCH" && url.pathname === "/api/music") {
+      const snapshot = await this.#requiredMusic().update(await readJson(request));
+      this.#broadcast("music", snapshot);
+      json(response, 200, snapshot);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/music/request") {
+      const body = await readJson(request);
+      const item = await this.#requiredMusic().requestSong(
+        String(body.query ?? ""),
+        String(body.requestedBy ?? "控制台"),
+      );
+      json(response, 201, { accepted: true, item, music: this.#requiredMusic().snapshot });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/music/skip") {
+      await this.#requiredMusic().skip();
+      json(response, 202, { accepted: true, music: this.#requiredMusic().snapshot });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/music/vip") {
+      const result = await this.#requiredMusic().claimVip();
+      json(response, 200, { result, music: this.#requiredMusic().snapshot });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/music/audio.ogg") {
+      const music = this.#requiredMusic();
+      if (!music.snapshot.configuration.enabled || music.snapshot.runtime.audio === "stopped") {
+        throw new HttpError(409, "Broadcast music audio is not enabled");
+      }
+      music.startAudioStream(response);
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/broadcast") {
@@ -501,6 +554,7 @@ export class ControlPlane {
       });
       response.write(`event: state\ndata: ${JSON.stringify(this.#snapshot)}\n\n`);
       response.write(`event: broadcast\ndata: ${JSON.stringify(await this.#broadcastSnapshot(false))}\n\n`);
+      response.write(`event: music\ndata: ${JSON.stringify(this.#music?.snapshot ?? null)}\n\n`);
       this.#clients.add(response);
       request.on("close", () => this.#clients.delete(response));
       return;
@@ -972,6 +1026,11 @@ export class ControlPlane {
   #serverPort(): number {
     const address = this.#server?.address();
     return typeof address === "object" && address ? address.port : this.port;
+  }
+
+  #requiredMusic(): MusicService {
+    if (!this.#music) throw new HttpError(503, "Music service is not initialized");
+    return this.#music;
   }
 
   async #selectedReplayItem(id: string | null): Promise<BroadcastMediaItem> {

@@ -280,6 +280,14 @@ export async function startVirtualGame(options: {
       WAYLAND_DISPLAY: hostEnvironment.WAYLAND_DISPLAY,
       XDG_RUNTIME_DIR: hostEnvironment.XDG_RUNTIME_DIR,
     };
+    // The project-local Cage runtime may intentionally carry a wlroots-only
+    // library directory. Native capture tools are built against the host's
+    // current FFmpeg ABI and must not inherit that compositor loader path.
+    if (process.env.LD_LIBRARY_PATH) {
+      captureEnvironment.LD_LIBRARY_PATH = process.env.LD_LIBRARY_PATH;
+    } else {
+      delete captureEnvironment.LD_LIBRARY_PATH;
+    }
     const outputResult = await runCommand("wlr-randr", ["--json"], {
       env: captureEnvironment,
       timeoutMs: 5_000,
@@ -601,12 +609,21 @@ export async function startVirtualDashboard(options: {
 export function continuousGameRecorderArguments(options: {
   output: string;
   outputName: string;
+  audioSource?: string;
 }): string[] {
   return [
     "-D",
     "-r", "30",
     "--no-dmabuf",
     "-o", options.outputName,
+    ...(options.audioSource
+      ? [
+        `--audio=${options.audioSource}`,
+        "-C", "libopus",
+        "-R", "48000",
+        "-P", "b=160k",
+      ]
+      : []),
     "-c", "libx264",
     "-p", "preset=veryfast",
     "-p", "crf=18",

@@ -14,6 +14,10 @@ const state = {
   itemRows: new Map(),
   livePreviewDevice: null,
   broadcast: null,
+  music: null,
+  musicFormVersion: "",
+  musicAudioKey: "",
+  musicAudioReconnectTimer: null,
   broadcastModeKey: "",
   broadcastIndex: 0,
   broadcastFormVersion: "",
@@ -70,6 +74,7 @@ function tick() {
     byId("elapsed").textContent = formatElapsed((state.snapshot.time?.elapsedMs || 0) + runningDelta);
   }
   if (broadcast) updateResetTime();
+  if (broadcast) updateMusicOverlays();
   requestAnimationFrame(tick);
 }
 
@@ -592,6 +597,138 @@ async function refreshBroadcast() {
   }
 }
 
+async function refreshMusic() {
+  try {
+    applyMusicSnapshot(await fetch("/api/music", { cache: "no-store" }).then(assertJson));
+  } catch (error) {
+    if (broadcast) showBroadcastNote(`音乐服务重连中：${error.message}`);
+  }
+}
+
+function renderMusicControl(snapshot, force = false) {
+  if (broadcast || director || compact) return;
+  const configuration = snapshot.configuration;
+  const formOpen = !byId("broadcast-configuration").hidden;
+  if (!force && formOpen && state.musicFormVersion === configuration.updatedAt) {
+    renderMusicRuntime(snapshot);
+    return;
+  }
+  state.musicFormVersion = configuration.updatedAt;
+  byId("music-enabled").checked = configuration.enabled;
+  byId("music-room-id").value = configuration.roomId;
+  byId("music-request-prefix").value = configuration.requestPrefix;
+  byId("music-provider").value = configuration.provider;
+  byId("music-provider-url").value = configuration.providerBaseUrl;
+  byId("music-provider-binary").value = configuration.providerBinary;
+  byId("music-profile-directory").value = configuration.profileDirectory;
+  byId("music-daily").checked = configuration.dailyRecommendations;
+  byId("music-vip-auto").checked = configuration.vipAutoClaim;
+  byId("music-now-playing").checked = configuration.nowPlayingEnabled;
+  byId("music-hint-enabled").checked = configuration.hintEnabled;
+  byId("music-lyrics-enabled").checked = configuration.lyricsEnabled;
+  byId("music-volume").value = String(configuration.musicVolume);
+  byId("music-volume-label").textContent = `${Math.round(configuration.musicVolume * 100)}%`;
+  byId("music-queue-mode").value = configuration.queueOverlayMode;
+  byId("music-queue-seconds").value = String(configuration.queueDisplaySeconds);
+  byId("music-now-seconds").value = String(configuration.nowPlayingSeconds);
+  byId("music-hint-interval").value = String(configuration.hintIntervalSeconds);
+  byId("music-lyrics-x").value = String(configuration.lyricsXPercent);
+  byId("music-lyrics-y").value = String(configuration.lyricsYPercent);
+  byId("music-hint-text").value = configuration.hintText;
+  renderMusicRuntime(snapshot);
+}
+
+function renderMusicRuntime(snapshot) {
+  if (broadcast || director || compact) return;
+  const runtime = snapshot.runtime;
+  byId("music-runtime-status").textContent =
+    `${runtime.phase.toUpperCase()} · 弹幕 ${runtime.danmaku.phase.toUpperCase()} · 音频 ${runtime.audio.toUpperCase()}`;
+  const queue = snapshot.queue || [];
+  const current = snapshot.current
+    ? `正在播放：${snapshot.current.track.title} — ${snapshot.current.track.artist}`
+    : "当前未播放";
+  const waiting = queue.length
+    ? queue.map((item, index) => `${index + 1}. ${item.track.title} — ${item.track.artist}（${item.requestedBy}）`).join("　")
+    : "队列为空";
+  byId("music-control-queue").textContent = `${current}　|　${waiting}`;
+  if (runtime.error) byId("music-action-message").textContent = runtime.error;
+}
+
+function applyMusicSnapshot(snapshot) {
+  if (!snapshot) return;
+  state.music = snapshot;
+  renderMusicControl(snapshot);
+  if (!broadcast) return;
+  const configuration = snapshot.configuration;
+  const ready = configuration.enabled && ["ready", "playing"].includes(snapshot.runtime.audio);
+  const audio = byId("music-audio");
+  const key = ready ? "enabled" : "disabled";
+  if (key !== state.musicAudioKey) {
+    state.musicAudioKey = key;
+    clearTimeout(state.musicAudioReconnectTimer);
+    if (ready) {
+      audio.src = `/api/music/audio.ogg?t=${Date.now()}`;
+      audio.muted = preview;
+      audio.volume = 1;
+      audio.play().catch(() => {
+        if (!preview) showBroadcastNote("浏览器阻止了音乐自动播放；点击页面即可启用");
+      });
+    } else {
+      audio.pause(); audio.removeAttribute("src"); audio.load();
+    }
+  }
+  byId("music-overlay").hidden = !configuration.enabled;
+  updateMusicOverlays();
+}
+
+function updateMusicOverlays() {
+  const snapshot = state.music;
+  if (!broadcast || !snapshot?.configuration?.enabled) return;
+  const configuration = snapshot.configuration;
+  const now = Date.now();
+  const current = snapshot.current;
+  const songElapsed = current ? now - Date.parse(current.startedAt) : Number.POSITIVE_INFINITY;
+  const showNow = Boolean(current && configuration.nowPlayingEnabled &&
+    songElapsed <= configuration.nowPlayingSeconds * 1000);
+  const nowOverlay = byId("music-now-overlay");
+  nowOverlay.hidden = !showNow;
+  if (current) {
+    byId("music-now-title").textContent = current.track.title;
+    byId("music-now-artist").textContent = current.track.artist;
+    byId("music-now-hint").textContent = configuration.hintEnabled ? configuration.hintText : "";
+  }
+  const queueChangedAgo = now - Date.parse(snapshot.queueChangedAt);
+  const showQueue = configuration.queueOverlayMode === "always" ||
+    (configuration.queueOverlayMode === "changes" && queueChangedAgo <= configuration.queueDisplaySeconds * 1000);
+  byId("music-queue-overlay").hidden = !showQueue;
+  const queueList = byId("music-queue-list");
+  if (showQueue) {
+    queueList.replaceChildren(...(snapshot.queue || []).slice(0, 8).map((item) => {
+      const row = document.createElement("li");
+      row.textContent = `${item.track.title} — ${item.track.artist}`;
+      return row;
+    }));
+    if (!snapshot.queue?.length) {
+      const row = document.createElement("li"); row.textContent = "队列为空 · 每日推荐播放中"; queueList.append(row);
+    }
+  }
+  const periodicSeconds = configuration.hintIntervalSeconds;
+  const periodicHint = periodicSeconds > 0 && (Math.floor(now / 1000) % periodicSeconds) < 8;
+  const hintOverlay = byId("music-hint-overlay");
+  const showHint = configuration.hintEnabled && !showNow && (showQueue || periodicHint);
+  hintOverlay.hidden = !showHint;
+  hintOverlay.textContent = configuration.hintText;
+  const lyricOverlay = byId("music-lyric-overlay");
+  lyricOverlay.style.setProperty("--music-lyrics-x", `${configuration.lyricsXPercent}%`);
+  lyricOverlay.style.setProperty("--music-lyrics-y", `${configuration.lyricsYPercent}%`);
+  const lyric = current && configuration.lyricsEnabled
+    ? current.lyrics.findLast((line) => line.startMs <= songElapsed &&
+      songElapsed < line.startMs + Math.max(line.durationMs, 250))
+    : null;
+  lyricOverlay.hidden = !lyric;
+  lyricOverlay.textContent = lyric?.text || "";
+}
+
 function applyBroadcastSnapshot(snapshot) {
   state.broadcast = snapshot;
   renderBroadcastControl(snapshot);
@@ -730,10 +867,11 @@ async function saveBroadcast(event) {
   byId("broadcast-save").disabled = true;
   byId("broadcast-message").textContent = "正在保存并切换…";
   try {
-    const snapshot = await fetch("/api/broadcast", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const [snapshot, music] = await Promise.all([
+      fetch("/api/broadcast", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
         mode: byId("broadcast-mode").value,
         playlist: state.playlistDraft,
         replayWhenIdle: byId("replay-idle").checked,
@@ -748,13 +886,78 @@ async function saveBroadcast(event) {
         replayBadgeText: byId("replay-badge-text").value,
         volume: Number(byId("broadcast-volume").value),
       }),
-    }).then(assertJson);
+      }).then(assertJson),
+      fetch("/api/music", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(musicConfigurationFromForm()),
+      }).then(assertJson),
+    ]);
     applyBroadcastSnapshot(snapshot);
+    applyMusicSnapshot(music);
     renderBroadcastControl(snapshot, true);
+    renderMusicControl(music, true);
     byId("broadcast-message").textContent = "已持久化并立即应用到 /live。";
   } catch (error) {
     byId("broadcast-message").textContent = error.message;
   } finally { byId("broadcast-save").disabled = false; }
+}
+
+function musicConfigurationFromForm() {
+  return {
+    enabled: byId("music-enabled").checked,
+    roomId: byId("music-room-id").value,
+    requestPrefix: byId("music-request-prefix").value,
+    provider: byId("music-provider").value,
+    providerBaseUrl: byId("music-provider-url").value,
+    providerBinary: byId("music-provider-binary").value,
+    profileDirectory: byId("music-profile-directory").value,
+    dailyRecommendations: byId("music-daily").checked,
+    musicVolume: Number(byId("music-volume").value),
+    queueOverlayMode: byId("music-queue-mode").value,
+    queueDisplaySeconds: Number(byId("music-queue-seconds").value),
+    nowPlayingEnabled: byId("music-now-playing").checked,
+    nowPlayingSeconds: Number(byId("music-now-seconds").value),
+    hintEnabled: byId("music-hint-enabled").checked,
+    hintText: byId("music-hint-text").value,
+    hintIntervalSeconds: Number(byId("music-hint-interval").value),
+    lyricsEnabled: byId("music-lyrics-enabled").checked,
+    lyricsXPercent: Number(byId("music-lyrics-x").value),
+    lyricsYPercent: Number(byId("music-lyrics-y").value),
+    vipAutoClaim: byId("music-vip-auto").checked,
+  };
+}
+
+async function manualMusicRequest() {
+  const query = byId("music-manual-query").value.trim();
+  if (!query) return;
+  byId("music-request-button").disabled = true;
+  try {
+    const result = await fetch("/api/music/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, requestedBy: "控制台" }),
+    }).then(assertJson);
+    byId("music-manual-query").value = "";
+    applyMusicSnapshot(result.music);
+    byId("music-action-message").textContent = `已加入：${result.item.track.title}`;
+  } catch (error) {
+    byId("music-action-message").textContent = error.message;
+  } finally { byId("music-request-button").disabled = false; }
+}
+
+async function musicAction(action) {
+  try {
+    const result = await fetch(`/api/music/${action}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    }).then(assertJson);
+    applyMusicSnapshot(result.music);
+    byId("music-action-message").textContent = action === "skip"
+      ? "已切歌"
+      : result.result?.claimed
+        ? `VIP 已领取${result.result.hours ? ` ${result.result.hours} 小时` : ""}`
+        : result.result?.message || "签到请求已完成";
+  } catch (error) { byId("music-action-message").textContent = error.message; }
 }
 
 async function importBroadcastMedia() {
@@ -855,6 +1058,7 @@ async function assertJson(response) {
 
 async function bootstrap() {
   const initialBroadcast = broadcast ? refreshBroadcast() : null;
+  const initialMusic = refreshMusic();
   const [snapshot, transcript] = await Promise.all([
     fetch("/api/challenge").then(assertJson),
     fetch("/api/transcript").then(assertJson),
@@ -867,6 +1071,7 @@ async function bootstrap() {
     await Promise.all([
       refreshSupervisor(),
       initialBroadcast || refreshBroadcast(),
+      initialMusic,
     ]);
     if (!director && !broadcast && !state.supervisor?.active) byId("configuration").hidden = false;
     setInterval(refreshSupervisor, 2_000);
@@ -886,6 +1091,7 @@ events.addEventListener("transcript", (event) => addTranscript(JSON.parse(event.
 events.addEventListener("transcript_reset", (event) => replaceTranscript(JSON.parse(event.data)));
 events.addEventListener("frame", (event) => showFrame(JSON.parse(event.data).sha256));
 events.addEventListener("broadcast", (event) => applyBroadcastSnapshot(JSON.parse(event.data)));
+events.addEventListener("music", (event) => applyMusicSnapshot(JSON.parse(event.data)));
 events.addEventListener("configuration", (event) => {
   if (director || broadcast) return;
   const result = JSON.parse(event.data);
@@ -923,14 +1129,25 @@ byId("replay-image").addEventListener("error", () => {
 });
 byId("replay-audio").addEventListener("playing", () => showBroadcastNote(""));
 byId("live-audio").addEventListener("playing", () => showBroadcastNote(""));
+byId("music-audio").addEventListener("playing", () => showBroadcastNote(""));
+byId("music-audio").addEventListener("error", () => {
+  if (!broadcast || !state.music?.configuration?.enabled) return;
+  state.musicAudioKey = "";
+  clearTimeout(state.musicAudioReconnectTimer);
+  state.musicAudioReconnectTimer = setTimeout(() => applyMusicSnapshot(state.music), 1_500);
+});
 document.addEventListener("click", () => {
-  if (!broadcast || preview || !state.broadcast?.configuration?.audioEnabled) return;
-  const media = state.broadcast.playback.mode === "live" ? byId("live-audio") : byId("replay-audio");
-  media.play().catch(() => undefined);
+  if (!broadcast || preview) return;
+  if (state.broadcast?.configuration?.audioEnabled) {
+    const media = state.broadcast.playback.mode === "live" ? byId("live-audio") : byId("replay-audio");
+    media.play().catch(() => undefined);
+  }
+  if (state.music?.configuration?.enabled) byId("music-audio").play().catch(() => undefined);
 }, { passive: true });
 document.addEventListener("visibilitychange", () => {
-  if (!broadcast || document.hidden || state.broadcast?.playback?.mode !== "replay") return;
-  byId("replay-audio").play().catch(() => undefined);
+  if (!broadcast || document.hidden) return;
+  if (state.broadcast?.playback?.mode === "replay") byId("replay-audio").play().catch(() => undefined);
+  if (state.music?.configuration?.enabled) byId("music-audio").play().catch(() => undefined);
 });
 
 if (!compact && !director && !broadcast) {
@@ -939,7 +1156,7 @@ if (!compact && !director && !broadcast) {
   byId("broadcast-button").addEventListener("click", async () => {
     byId("broadcast-configuration").hidden = false;
     byId("live-preview").src = "/live?preview=1";
-    await refreshBroadcast();
+    await Promise.all([refreshBroadcast(), refreshMusic()]);
   });
   byId("broadcast-close").addEventListener("click", () => { byId("broadcast-configuration").hidden = true; });
   byId("open-live-button").addEventListener("click", () => window.open("/live", "_blank", "noopener"));
@@ -953,6 +1170,15 @@ if (!compact && !director && !broadcast) {
   byId("broadcast-volume").addEventListener("input", () => {
     byId("broadcast-volume-label").textContent = `${Math.round(Number(byId("broadcast-volume").value) * 100)}%`;
   });
+  byId("music-volume").addEventListener("input", () => {
+    byId("music-volume-label").textContent = `${Math.round(Number(byId("music-volume").value) * 100)}%`;
+  });
+  byId("music-request-button").addEventListener("click", manualMusicRequest);
+  byId("music-manual-query").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); void manualMusicRequest(); }
+  });
+  byId("music-skip-button").addEventListener("click", () => musicAction("skip"));
+  byId("music-vip-button").addEventListener("click", () => musicAction("vip"));
   byId("challenge-form").addEventListener("input", saveChallengeDraftSoon);
   byId("challenge-form").addEventListener("change", saveChallengeDraftSoon);
   byId("restore-draft-button").addEventListener("click", () => {
