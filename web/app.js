@@ -18,6 +18,8 @@ const state = {
   musicFormVersion: "",
   musicAudioKey: "",
   musicAudioReconnectTimer: null,
+  musicAudioLastTime: 0,
+  musicAudioLastProgressAt: 0,
   broadcastModeKey: "",
   broadcastIndex: 0,
   broadcastFormVersion: "",
@@ -674,6 +676,8 @@ function applyMusicSnapshot(snapshot) {
     state.musicAudioKey = key;
     clearTimeout(state.musicAudioReconnectTimer);
     if (ready) {
+      state.musicAudioLastTime = 0;
+      state.musicAudioLastProgressAt = Date.now();
       audio.src = `/api/music/audio.ogg?t=${Date.now()}`;
       audio.muted = preview;
       audio.volume = 1;
@@ -681,11 +685,40 @@ function applyMusicSnapshot(snapshot) {
         if (!preview) showBroadcastNote("浏览器阻止了音乐自动播放；点击页面即可启用");
       });
     } else {
+      state.musicAudioLastTime = 0;
+      state.musicAudioLastProgressAt = 0;
       audio.pause(); audio.removeAttribute("src"); audio.load();
     }
   }
   byId("music-overlay").hidden = !configuration.enabled;
   updateMusicOverlays();
+}
+
+function reconnectMusicAudio(delayMs = 1_500) {
+  if (!broadcast || !state.music?.configuration?.enabled) return;
+  const audio = byId("music-audio");
+  state.musicAudioKey = "";
+  state.musicAudioLastTime = 0;
+  state.musicAudioLastProgressAt = Date.now();
+  audio.pause(); audio.removeAttribute("src"); audio.load();
+  clearTimeout(state.musicAudioReconnectTimer);
+  state.musicAudioReconnectTimer = setTimeout(() => applyMusicSnapshot(state.music), delayMs);
+}
+
+function checkMusicAudioProgress() {
+  if (!broadcast || preview || state.musicAudioKey !== "enabled") return;
+  const ready = state.music?.configuration?.enabled &&
+    ["ready", "playing"].includes(state.music?.runtime?.audio);
+  if (!ready) return;
+  const audio = byId("music-audio");
+  const currentTime = Number(audio.currentTime);
+  if (Number.isFinite(currentTime) && currentTime > state.musicAudioLastTime + 0.05) {
+    state.musicAudioLastTime = currentTime;
+    state.musicAudioLastProgressAt = Date.now();
+    return;
+  }
+  if (audio.paused) audio.play().catch(() => undefined);
+  if (Date.now() - state.musicAudioLastProgressAt > 12_000) reconnectMusicAudio(250);
 }
 
 function updateMusicOverlays() {
@@ -1142,13 +1175,19 @@ byId("replay-image").addEventListener("error", () => {
 });
 byId("replay-audio").addEventListener("playing", () => showBroadcastNote(""));
 byId("live-audio").addEventListener("playing", () => showBroadcastNote(""));
-byId("music-audio").addEventListener("playing", () => showBroadcastNote(""));
-byId("music-audio").addEventListener("error", () => {
-  if (!broadcast || !state.music?.configuration?.enabled) return;
-  state.musicAudioKey = "";
-  clearTimeout(state.musicAudioReconnectTimer);
-  state.musicAudioReconnectTimer = setTimeout(() => applyMusicSnapshot(state.music), 1_500);
+byId("music-audio").addEventListener("playing", () => {
+  state.musicAudioLastProgressAt = Date.now();
+  showBroadcastNote("");
 });
+byId("music-audio").addEventListener("timeupdate", () => {
+  state.musicAudioLastTime = Number(byId("music-audio").currentTime) || 0;
+  state.musicAudioLastProgressAt = Date.now();
+});
+byId("music-audio").addEventListener("error", () => {
+  reconnectMusicAudio();
+});
+byId("music-audio").addEventListener("ended", () => reconnectMusicAudio(250));
+setInterval(checkMusicAudioProgress, 3_000);
 document.addEventListener("click", () => {
   if (!broadcast || preview) return;
   if (state.broadcast?.configuration?.audioEnabled) {

@@ -20,6 +20,8 @@ test("director bootstrap uses the internal controller event and supervisor surfa
   assert.match(script, /\/api\/live-audio\.ogg/);
   assert.match(script, /\/api\/music\/audio\.ogg/);
   assert.match(script, /events\.addEventListener\("music"/);
+  assert.match(script, /checkMusicAudioProgress/);
+  assert.match(script, /Date\.now\(\) - state\.musicAudioLastProgressAt > 12_000/);
   assert.match(script, /updateMusicOverlays/);
   assert.match(script, /replay\.mjpeg/);
   assert.match(script, /replay-audio\.ogg/);
