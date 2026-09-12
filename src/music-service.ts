@@ -63,6 +63,7 @@ interface MusicServiceDependencies {
   spawn?: typeof spawn;
   pulse?: boolean;
   random?: () => number;
+  retryDelayMs?: number;
 }
 
 export class MusicService {
@@ -73,6 +74,7 @@ export class MusicService {
   readonly #spawn: typeof spawn;
   readonly #pulseEnabled: boolean;
   readonly #random: () => number;
+  readonly #retryDelayMs: number;
   #configuration: MusicConfiguration;
   #phase: PublicMusicSnapshot["runtime"]["phase"] = "disabled";
   #providerState: PublicMusicSnapshot["runtime"]["provider"] = "stopped";
@@ -95,6 +97,7 @@ export class MusicService {
   #lastVipClaim: (VipClaimResult & { at: string }) | null = null;
   #generation = 0;
   #activation: Promise<void> = Promise.resolve();
+  #playRetry: NodeJS.Timeout | null = null;
 
   private constructor(
     rootDirectory: string,
@@ -110,6 +113,7 @@ export class MusicService {
     this.#spawn = dependencies.spawn ?? spawn;
     this.#pulseEnabled = dependencies.pulse !== false;
     this.#random = dependencies.random ?? Math.random;
+    this.#retryDelayMs = Math.max(100, dependencies.retryDelayMs ?? 15_000);
   }
 
   static async open(
@@ -242,6 +246,8 @@ export class MusicService {
 
   async close(): Promise<void> {
     this.#generation += 1;
+    if (this.#playRetry) clearTimeout(this.#playRetry);
+    this.#playRetry = null;
     this.#danmaku?.close();
     this.#danmaku = null;
     if (this.#player) stopProcessGroup(this.#player);
@@ -335,6 +341,8 @@ export class MusicService {
 
   async #stopRuntime(): Promise<void> {
     this.#generation += 1;
+    if (this.#playRetry) clearTimeout(this.#playRetry);
+    this.#playRetry = null;
     this.#danmaku?.close();
     this.#danmaku = null;
     this.#danmakuState = { phase: "closed", roomId: null, reconnectAttempt: 0, error: null };
@@ -385,14 +393,19 @@ export class MusicService {
         };
       }
     }
-    if (!item || generation !== this.#generation) return;
+    if (!item || generation !== this.#generation) {
+      if (generation === this.#generation && this.#configuration.dailyRecommendations) {
+        this.#schedulePlayNext(generation, this.#retryDelayMs);
+      }
+      return;
+    }
     let prepared: PreparedMusicTrack;
     try {
       prepared = await this.#provider.prepareTrack(item.track);
     } catch (firstError) {
       if (!this.#configuration.vipAutoClaim) {
         this.#error = safeError(firstError);
-        setTimeout(() => void this.#playNext(generation), 500).unref();
+        this.#schedulePlayNext(generation, this.#retryDelayMs);
         return;
       }
       try {
@@ -400,7 +413,7 @@ export class MusicService {
         prepared = await this.#provider.prepareTrack(item.track);
       } catch (secondError) {
         this.#error = safeError(secondError);
-        setTimeout(() => void this.#playNext(generation), 500).unref();
+        this.#schedulePlayNext(generation, this.#retryDelayMs);
         return;
       }
     }
@@ -431,10 +444,19 @@ export class MusicService {
       this.#current = null;
       this.#audioState = this.#sinkModuleId ? "ready" : "stopped";
       this.#notify();
-      setTimeout(() => void this.#playNext(generation), 250).unref();
+      this.#schedulePlayNext(generation, 250);
     };
     child.once("error", finished);
     child.once("exit", finished);
+  }
+
+  #schedulePlayNext(generation: number, delayMs: number): void {
+    if (generation !== this.#generation || this.#playRetry) return;
+    this.#playRetry = setTimeout(() => {
+      this.#playRetry = null;
+      void this.#playNext(generation);
+    }, delayMs);
+    this.#playRetry.unref();
   }
 
   async #nextRecommendation(): Promise<MusicTrack | null> {

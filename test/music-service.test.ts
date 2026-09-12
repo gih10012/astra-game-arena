@@ -96,6 +96,49 @@ test("daily playback remains ready when danmaku initialization fails", async () 
   await service.close();
 });
 
+test("daily playback retries after a transient recommendation failure", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "arena-music-service-"));
+  await writeMusicConfiguration(root, { ...defaultMusicConfiguration(), enabled: true });
+  const track: MusicTrack = {
+    id: "daily-retry", hash: "daily-retry", title: "恢复播放", artist: "歌手", source: "test",
+  };
+  let attempts = 0;
+  const provider: MusicProvider = {
+    id: "test",
+    start: async () => undefined,
+    health: async () => true,
+    healthy: async () => true,
+    search: async () => [],
+    dailyRecommendations: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary upstream failure");
+      return [track];
+    },
+    resolvePlayable: async () => ({ ...track, url: "https://example.invalid/song.mp3", resolvedHash: track.hash, quality: "128" }),
+    lyrics: async () => [],
+    prepareTrack: async () => ({ track, url: "https://example.invalid/song.mp3", resolvedHash: track.hash, quality: "128", lyrics: [] }),
+    claimVip: async () => ({ claimed: false }),
+    close: async () => undefined,
+  };
+  const service = await MusicService.open(root, () => undefined, {
+    providerFactory: () => provider,
+    danmakuFactory: () => ({ start: async () => undefined, close: () => undefined }) as never,
+    pulse: false,
+    retryDelayMs: 100,
+  });
+
+  await service.activate();
+  const initial = service.snapshot;
+  assert.equal(initial.current, null);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(attempts, 2);
+  const recovered = service.snapshot;
+  assert.equal(recovered.current?.track.id, "daily-retry");
+  assert.equal(recovered.runtime.audio, "playing");
+  assert.equal(recovered.runtime.error, null);
+  await service.close();
+});
+
 async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
