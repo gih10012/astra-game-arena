@@ -133,16 +133,7 @@ export async function startVirtualCamera(options: {
   audit: AuditLog;
   onUnexpectedExit?: (message: string) => void;
 }): Promise<ActiveVirtualCamera> {
-  const available = await discoverVirtualCameraDevices();
-  const selected = available.find((entry) => entry.device === options.device);
-  if (!selected) {
-    throw new Error(
-      `Virtual camera ${options.device} is not a detected v4l2loopback device`,
-    );
-  }
-  if (!selected.writable) {
-    throw new Error(`Virtual camera ${options.device} is not writable by this user`);
-  }
+  await waitForWritableVirtualCamera(options.device);
 
   const gameProcess = spawn(
     "wf-recorder",
@@ -202,6 +193,32 @@ export async function startVirtualCamera(options: {
       await Promise.all([stopProcess(ffmpegProcess), stopProcess(gameProcess)]);
     },
   };
+}
+
+export async function waitForWritableVirtualCamera(
+  device: string,
+  options: {
+    timeoutMs?: number;
+    pollMs?: number;
+    discover?: typeof discoverVirtualCameraDevices;
+  } = {},
+): Promise<VirtualCameraDevice> {
+  const timeoutMs = Math.max(0, options.timeoutMs ?? 15_000);
+  const pollMs = Math.max(1, options.pollMs ?? 250);
+  const discover = options.discover ?? discoverVirtualCameraDevices;
+  const deadline = Date.now() + timeoutMs;
+  let detected = false;
+  do {
+    const selected = (await discover()).find((entry) => entry.device === device);
+    if (selected?.writable) return selected;
+    detected ||= selected !== undefined;
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+  } while (Date.now() <= deadline);
+  if (!detected) {
+    throw new Error(`Virtual camera ${device} is not a detected v4l2loopback device`);
+  }
+  throw new Error(`Virtual camera ${device} is not writable by this user`);
 }
 
 async function waitForCaptureReady(

@@ -904,16 +904,22 @@ async function runAttempt(checkpointStore: CheckpointStore): Promise<RunOutcome>
         virtualCameraError: null,
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       await privateAudio?.disableMicrophone().catch(() => undefined);
       await updateMediaState({
         virtualCameraActive: false,
         virtualCameraDevice: null,
-        virtualCameraError: error instanceof Error ? error.message : String(error),
+        virtualCameraError: message,
         virtualMicrophoneActive: false,
         virtualMicrophoneName: privateAudio?.microphoneName ?? null,
-        virtualMicrophoneError: error instanceof Error ? error.message : String(error),
+        virtualMicrophoneError: message,
       });
-      throw error;
+      await audit.append("virtual_camera.failed", { message });
+      controller?.publishTranscript({
+        type: "runner.error",
+        message: `Virtual camera output is unavailable; the challenge will continue: ${message}`,
+      });
+      return;
     }
     await audit.append("virtual_camera.started", {
       device: started.device,

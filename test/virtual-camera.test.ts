@@ -4,6 +4,7 @@ import {
   virtualCameraBrowserStreamArguments,
   virtualCameraFfmpegArguments,
   virtualCameraGameRecorderArguments,
+  waitForWritableVirtualCamera,
 } from "../src/virtual-camera.js";
 
 test("builds a live 1920x1080 V4L2 composition without touching a real camera", () => {
@@ -33,4 +34,23 @@ test("builds a 30 fps browser stream from the game region of the virtual camera"
   assert.equal(args[args.indexOf("-i") + 1], "/dev/video10");
   assert.equal(args[args.indexOf("-vf") + 1], "crop=1248:810:20:200,fps=30");
   assert.equal(args[args.indexOf("-c:v") + 1], "mjpeg");
+});
+
+test("virtual camera access waits for the post-resume udev ACL", async () => {
+  let attempts = 0;
+  const selected = await waitForWritableVirtualCamera("/dev/video10", {
+    timeoutMs: 100,
+    pollMs: 1,
+    discover: async () => {
+      attempts += 1;
+      return [{
+        device: "/dev/video10",
+        label: "Astra Game Arena",
+        driver: "v4l2loopback",
+        writable: attempts >= 3,
+      }];
+    },
+  });
+  assert.equal(selected.writable, true);
+  assert.equal(attempts, 3);
 });
